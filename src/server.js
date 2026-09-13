@@ -1,3 +1,4 @@
+import os from 'node:os';
 import Fastify from 'fastify';
 import cors from '@fastify/cors';
 import { config } from './config.js';
@@ -42,9 +43,21 @@ const shutdown = async () => {
 process.on('SIGINT', shutdown);
 process.on('SIGTERM', shutdown);
 
+function reachableUrls(port) {
+  const urls = [`http://localhost:${port}`];
+  for (const addresses of Object.values(os.networkInterfaces())) {
+    for (const address of addresses ?? []) {
+      if (address.family === 'IPv4' && !address.internal) {
+        urls.push(`http://${address.address}:${port}`);
+      }
+    }
+  }
+  return urls;
+}
+
 await app.listen({ port: config.port, host: config.host });
 
 if (config.localMediaRoots.length === 0) {
   app.log.warn('LOCAL_MEDIA_ROOTS is empty: the thumbnail endpoint will serve any readable path. Set it before exposing the API.');
 }
-app.log.info(`Photo Atlas API ready on http://${config.host}:${config.port}`);
+app.log.info(`Photo Atlas API ready: ${reachableUrls(config.port).join('  |  ')}`);

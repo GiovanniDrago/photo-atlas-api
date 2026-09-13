@@ -3,11 +3,37 @@
 ## One command
 
 ```bash
-bash scripts/dev.sh
+bash scripts/dev-up.sh    # database check + API + app web preview, prints the URLs
+bash scripts/dev-down.sh  # stops what dev-up started
 ```
 
-This starts a database if needed (Supabase CLI → Docker → system PostgreSQL, first match wins),
-applies migrations, then runs the API with `node` (no watcher).
+`dev-up.sh` reuses anything already listening on the API (8787) or web (8080) port, so it is safe
+to run next to a manually started `npm run dev`. It starts the app web preview through
+`photo-atlas-app/scripts/serve-web.sh` (override the repo location with `PHOTO_ATLAS_APP_DIR`).
+
+## URLs
+
+```bash
+bash scripts/dev-urls.sh
+```
+
+```
+Photo Atlas development URLs
+  VM IP:        10.30.127.225
+  API (here):   http://localhost:8787
+  API (phone):  http://10.30.127.225:8787
+  API status:   online
+  Web (phone):  http://10.30.127.225:8080/photo-atlas-app/
+```
+
+The API also prints every reachable URL on startup, for example:
+
+```
+Photo Atlas API ready: http://localhost:8787  |  http://10.30.127.225:8787
+```
+
+The VM IP comes from DHCP and can change when the VM restarts; the web app detects its own host
+automatically, so opening the printed `Web (phone)` URL is enough.
 
 ## Day-to-day
 
