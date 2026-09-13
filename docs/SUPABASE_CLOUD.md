@@ -47,8 +47,8 @@ Restart the API. No code changes are needed.
 
 ## 5. Row Level Security (recommended before exposing the project)
 
-The local single-user setup does not enable RLS. If you plan to call the database directly from
-clients or to use the Supabase auto-generated API, enable RLS per table and add policies, for
+The local setup uses its own `users`/`sessions` tables and enforces ownership in the API. If you
+move to Supabase Auth, point `sources.owner_id` at `auth.users(id)` and enable RLS per table, for
 example:
 
 ```sql

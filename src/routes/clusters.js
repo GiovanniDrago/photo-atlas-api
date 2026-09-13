@@ -11,13 +11,14 @@ export default async function clusterRoutes(app) {
     if (sourceId != null && !UUID_PATTERN.test(sourceId)) {
       return reply.code(400).send({ error: 'source_id must be a valid uuid' });
     }
-    const { rows } = await query('SELECT * FROM media_clusters($1, $2, $3, $4, $5, $6)', [
+    const { rows } = await query('SELECT * FROM media_clusters($1, $2, $3, $4, $5, $6, $7)', [
       Number(west),
       Number(south),
       Number(east),
       Number(north),
       Number(zoom),
       sourceId ?? null,
+      request.user.id,
     ]);
     return {
       clusters: rows.map((row) => ({

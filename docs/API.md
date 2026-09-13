@@ -3,6 +3,39 @@
 Base URL: `http://localhost:8787`. All responses are JSON. Errors use `{ "error": "..." }` with an
 appropriate status code.
 
+## Authentication
+
+Every `/api/*` route except `register` and `login` requires a session token:
+
+```
+Authorization: Bearer <token>
+```
+
+Sessions last 30 days and are revoked by `POST /api/auth/logout`.
+
+```bash
+# create an account (username and password only in this dev phase)
+curl -X POST http://localhost:8787/api/auth/register \
+  -H 'Content-Type: application/json' \
+  -d '{"username":"alice","password":"pw"}'
+
+# log in again later
+curl -X POST http://localhost:8787/api/auth/login \
+  -H 'Content-Type: application/json' \
+  -d '{"username":"alice","password":"pw"}'
+
+# current user
+curl http://localhost:8787/api/auth/me -H "Authorization: Bearer <token>"
+
+# revoke the session
+curl -X POST http://localhost:8787/api/auth/logout -H "Authorization: Bearer <token>"
+```
+
+Both endpoints return `{ "user": {...}, "token": "...", "expires_at": "..." }`. Registration is
+open, passwords are hashed with scrypt, and the raw token is never stored server side (only its
+SHA-256). Data is owned per user: sources, media, scan runs and the kDrive account are only visible
+to their owner. `GET /health` is public.
+
 ## Health
 
 ```bash

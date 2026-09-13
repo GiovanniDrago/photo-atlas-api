@@ -3,7 +3,9 @@ import Fastify from 'fastify';
 import cors from '@fastify/cors';
 import { config } from './config.js';
 import { pool } from './db.js';
+import { registerAuthHook } from './lib/auth.js';
 import healthRoutes from './routes/health.js';
+import authRoutes from './routes/auth.js';
 import sourceRoutes from './routes/sources.js';
 import mediaRoutes from './routes/media.js';
 import clusterRoutes from './routes/clusters.js';
@@ -20,7 +22,10 @@ await app.register(cors, {
   origin: config.corsOrigin === '*' ? true : config.corsOrigin.split(',').map((entry) => entry.trim()),
 });
 
+registerAuthHook(app);
+
 await app.register(healthRoutes);
+await app.register(authRoutes);
 await app.register(sourceRoutes);
 await app.register(mediaRoutes);
 await app.register(clusterRoutes);

@@ -7,8 +7,11 @@ import { upsertMediaItems, updateScanRun } from '../services/media-index.js';
 
 const BATCH_SIZE = 100;
 
-export async function getKDriveClient() {
-  const { rows } = await query('SELECT * FROM kdrive_accounts ORDER BY created_at ASC LIMIT 1');
+export async function getKDriveClient(userId) {
+  const { rows } = await query(
+    'SELECT * FROM kdrive_accounts WHERE owner_id = $1 ORDER BY created_at ASC LIMIT 1',
+    [userId],
+  );
   if (rows.length === 0) {
     const error = new Error('kDrive account is not connected');
     error.statusCode = 409;
@@ -42,17 +45,19 @@ function mapFile(file) {
   };
 }
 
-async function ensureSource(label, driveId, folderId) {
+async function ensureSource(label, driveId, folderId, ownerId) {
   const { rows } = await query(
-    'SELECT * FROM sources WHERE kind = $1 AND kdrive_drive_id = $2 AND kdrive_folder_id = $3 LIMIT 1',
-    ['kdrive', driveId, folderId],
+    `SELECT * FROM sources
+     WHERE kind = 'kdrive' AND kdrive_drive_id = $1 AND kdrive_folder_id = $2 AND owner_id = $3
+     LIMIT 1`,
+    [driveId, folderId, ownerId],
   );
   if (rows.length > 0) return rows[0];
   const inserted = await query(
-    `INSERT INTO sources (kind, label, kdrive_drive_id, kdrive_folder_id)
-     VALUES ('kdrive', $1, $2, $3)
+    `INSERT INTO sources (kind, label, kdrive_drive_id, kdrive_folder_id, owner_id)
+     VALUES ('kdrive', $1, $2, $3, $4)
      RETURNING *`,
-    [label, driveId, folderId],
+    [label, driveId, folderId, ownerId],
   );
   return inserted.rows[0];
 }
@@ -98,7 +103,11 @@ async function runScan({ scanRunId, sourceId, client, folderId, recursive }) {
       batch.push(mapped);
       if (batch.length >= BATCH_SIZE) await flush();
       if (filesSeen % 25 === 0) {
-        await updateScanRun(scanRunId, { files_seen: filesSeen, files_indexed: filesIndexed, files_skipped: filesSkipped });
+        await updateScanRun(scanRunId, {
+          files_seen: filesSeen,
+          files_indexed: filesIndexed,
+          files_skipped: filesSkipped,
+        });
       }
     }
     await flush();
@@ -121,32 +130,35 @@ async function runScan({ scanRunId, sourceId, client, folderId, recursive }) {
   }
 }
 
-const enrichState = {
-  running: false,
-  processed: 0,
-  updated: 0,
-  errors: [],
-  started_at: null,
-  finished_at: null,
-};
+const enrichStates = new Map();
 
-async function runEnrichment(limit) {
-  enrichState.running = true;
-  enrichState.processed = 0;
-  enrichState.updated = 0;
-  enrichState.errors = [];
-  enrichState.started_at = new Date().toISOString();
-  enrichState.finished_at = null;
+function enrichStateFor(userId) {
+  let state = enrichStates.get(userId);
+  if (!state) {
+    state = { running: false, processed: 0, updated: 0, errors: [], started_at: null, finished_at: null };
+    enrichStates.set(userId, state);
+  }
+  return state;
+}
+
+async function runEnrichment(userId, limit) {
+  const state = enrichStateFor(userId);
+  state.running = true;
+  state.processed = 0;
+  state.updated = 0;
+  state.errors = [];
+  state.started_at = new Date().toISOString();
+  state.finished_at = null;
   try {
-    const { client } = await getKDriveClient();
+    const { client } = await getKDriveClient(userId);
     const { rows } = await query(
       `SELECT m.id, m.external_key, m.name
        FROM media_items m
        JOIN sources s ON s.id = m.source_id
-       WHERE s.kind = 'kdrive' AND m.media_type = 'image' AND m.metadata_status <> 'full'
+       WHERE s.owner_id = $1 AND s.kind = 'kdrive' AND m.media_type = 'image' AND m.metadata_status <> 'full'
        ORDER BY m.indexed_at ASC
-       LIMIT $1`,
-      [limit],
+       LIMIT $2`,
+      [userId, limit],
     );
     for (const row of rows) {
       try {
@@ -163,19 +175,27 @@ async function runEnrichment(limit) {
              metadata_status = $7,
              updated_at = now()
            WHERE id = $1`,
-          [row.id, metadata.takenAt ?? null, metadata.lat ?? null, metadata.lon ?? null, metadata.width ?? null, metadata.height ?? null, status],
+          [
+            row.id,
+            metadata.takenAt ?? null,
+            metadata.lat ?? null,
+            metadata.lon ?? null,
+            metadata.width ?? null,
+            metadata.height ?? null,
+            status,
+          ],
         );
-        enrichState.updated += 1;
+        state.updated += 1;
       } catch (error) {
-        enrichState.errors.push(`${row.name}: ${error.message}`);
+        state.errors.push(`${row.name}: ${error.message}`);
       }
-      enrichState.processed += 1;
+      state.processed += 1;
     }
   } catch (error) {
-    enrichState.errors.push(String(error.message));
+    state.errors.push(String(error.message));
   } finally {
-    enrichState.running = false;
-    enrichState.finished_at = new Date().toISOString();
+    state.running = false;
+    state.finished_at = new Date().toISOString();
   }
 }
 
@@ -195,28 +215,31 @@ export default async function kdriveRoutes(app) {
       return reply.code(401).send({ error: `kDrive authentication failed: ${error.message}` });
     }
     const encrypted = encryptSecret(token, config.kdriveEncKey);
-    await query('DELETE FROM kdrive_accounts');
+    await query('DELETE FROM kdrive_accounts WHERE owner_id = $1', [request.user.id]);
     const { rows } = await query(
-      `INSERT INTO kdrive_accounts (label, drive_id, token_cipher, token_iv, token_tag)
-       VALUES ($1, $2, $3, $4, $5)
+      `INSERT INTO kdrive_accounts (label, drive_id, token_cipher, token_iv, token_tag, owner_id)
+       VALUES ($1, $2, $3, $4, $5, $6)
        RETURNING id, label, drive_id, created_at`,
-      [label ?? 'kDrive', Number(driveId), encrypted.cipher, encrypted.iv, encrypted.tag],
+      [label ?? 'kDrive', Number(driveId), encrypted.cipher, encrypted.iv, encrypted.tag, request.user.id],
     );
     return reply.code(201).send({ account: rows[0] });
   });
 
-  app.get('/api/kdrive/status', async () => {
-    const { rows } = await query('SELECT id, label, drive_id, created_at, updated_at FROM kdrive_accounts LIMIT 1');
+  app.get('/api/kdrive/status', async (request) => {
+    const { rows } = await query(
+      'SELECT id, label, drive_id, created_at, updated_at FROM kdrive_accounts WHERE owner_id = $1 LIMIT 1',
+      [request.user.id],
+    );
     return { connected: rows.length > 0, account: rows[0] ?? null };
   });
 
-  app.delete('/api/kdrive', async () => {
-    await query('DELETE FROM kdrive_accounts');
+  app.delete('/api/kdrive', async (request) => {
+    await query('DELETE FROM kdrive_accounts WHERE owner_id = $1', [request.user.id]);
     return { connected: false };
   });
 
   app.get('/api/kdrive/folders', async (request) => {
-    const { client } = await getKDriveClient();
+    const { client } = await getKDriveClient(request.user.id);
     const parentId = request.query?.parent_id ?? 1;
     const page = await client.listChildren(parentId, { type: 'dir', cursor: request.query?.cursor });
     return {
@@ -228,9 +251,13 @@ export default async function kdriveRoutes(app) {
   });
 
   app.get('/api/kdrive/files', async (request) => {
-    const { client } = await getKDriveClient();
+    const { client } = await getKDriveClient(request.user.id);
     const parentId = request.query?.parent_id ?? 1;
-    const page = await client.listChildren(parentId, { type: 'file', cursor: request.query?.cursor, limit: 200 });
+    const page = await client.listChildren(parentId, {
+      type: 'file',
+      cursor: request.query?.cursor,
+      limit: 200,
+    });
     return {
       parent_id: Number(parentId),
       files: page.items
@@ -245,12 +272,13 @@ export default async function kdriveRoutes(app) {
   app.post('/api/kdrive/scan', async (request, reply) => {
     const { folder_id: folderId, recursive = true, label } = request.body ?? {};
     if (!folderId) return reply.code(400).send({ error: 'folder_id is required' });
-    const { account, client } = await getKDriveClient();
+    const { account, client } = await getKDriveClient(request.user.id);
     const folder = await client.getFile(folderId);
     const source = await ensureSource(
       label ?? `${account.label}: ${folder?.name ?? `folder ${folderId}`}`,
       account.drive_id,
       folderId,
+      request.user.id,
     );
     const run = await query('INSERT INTO scan_runs (source_id) VALUES ($1) RETURNING *', [source.id]);
     setImmediate(() => {
@@ -266,15 +294,16 @@ export default async function kdriveRoutes(app) {
   });
 
   app.post('/api/kdrive/enrich', async (request, reply) => {
-    if (enrichState.running) {
-      return reply.code(409).send({ error: 'enrichment_already_running', state: enrichState });
+    const state = enrichStateFor(request.user.id);
+    if (state.running) {
+      return reply.code(409).send({ error: 'enrichment_already_running', state });
     }
     const limit = Math.min(Math.max(Number(request.body?.limit ?? 20), 1), 200);
     setImmediate(() => {
-      runEnrichment(limit).catch(() => {});
+      runEnrichment(request.user.id, limit).catch(() => {});
     });
     return reply.code(202).send({ queued: limit });
   });
 
-  app.get('/api/kdrive/enrich', async () => enrichState);
+  app.get('/api/kdrive/enrich', async (request) => enrichStateFor(request.user.id));
 }

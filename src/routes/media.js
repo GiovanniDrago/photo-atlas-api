@@ -70,6 +70,7 @@ export default async function mediaRoutes(app) {
     if (q.has_gps === 'true') conditions.push('m.lat IS NOT NULL');
     if (q.has_gps === 'false') conditions.push('m.lat IS NULL');
     if (q.q) conditions.push(`m.name ILIKE ${push(`%${q.q}%`)}`);
+    conditions.push(`s.owner_id = ${push(request.user.id)}`);
 
     const limit = clamp(Number(q.limit ?? 100), 1, config.maxBatchSize);
     const offset = Math.max(Number(q.offset ?? 0), 0);
@@ -110,6 +111,14 @@ export default async function mediaRoutes(app) {
       return reply.code(400).send({ error: `items length must be <= ${config.maxBatchSize}` });
     }
 
+    const owned = await query('SELECT 1 FROM sources WHERE id = $1 AND owner_id = $2', [
+      body.source_id,
+      request.user.id,
+    ]);
+    if (owned.rows.length === 0) {
+      return reply.code(404).send({ error: 'source not found' });
+    }
+
     const indexed = await upsertMediaItems(body.source_id, items);
     if (body.scan_run_id && isUuid(body.scan_run_id)) {
       await updateScanRun(body.scan_run_id, { files_seen: items.length, files_indexed: indexed });
@@ -123,8 +132,8 @@ export default async function mediaRoutes(app) {
       `SELECT ${BASE_FIELDS}
        FROM media_items m
        JOIN sources s ON s.id = m.source_id
-       WHERE m.id = $1`,
-      [request.params.id],
+       WHERE m.id = $1 AND s.owner_id = $2`,
+      [request.params.id, request.user.id],
     );
     if (rows.length === 0) return reply.code(404).send({ error: 'not_found' });
     return { item: rows[0] };
@@ -136,8 +145,8 @@ export default async function mediaRoutes(app) {
       `SELECT m.*, s.kind AS source_kind
        FROM media_items m
        JOIN sources s ON s.id = m.source_id
-       WHERE m.id = $1`,
-      [request.params.id],
+       WHERE m.id = $1 AND s.owner_id = $2`,
+      [request.params.id, request.user.id],
     );
     if (rows.length === 0) return reply.code(404).send({ error: 'not_found' });
     const item = rows[0];

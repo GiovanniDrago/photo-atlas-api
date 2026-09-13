@@ -47,10 +47,18 @@ npm run dev                      # API with --watch on http://localhost:8787
 Check the API:
 
 ```bash
+TOKEN=$(curl -s -X POST http://localhost:8787/api/auth/login \
+  -H 'Content-Type: application/json' \
+  -d '{"username":"demo","password":"demo"}' | python3 -c 'import json,sys; print(json.load(sys.stdin)["token"])')
+
 curl http://localhost:8787/health
-curl 'http://localhost:8787/api/clusters?west=-180&south=-90&east=180&north=90&zoom=0'
-curl 'http://localhost:8787/api/timeline' | head -c 400
+curl -H "Authorization: Bearer $TOKEN" 'http://localhost:8787/api/clusters?west=-180&south=-90&east=180&north=90&zoom=0'
+curl -H "Authorization: Bearer $TOKEN" 'http://localhost:8787/api/timeline'
 ```
+
+The seed creates a development account: **demo / demo** (override the password with
+`DEMO_PASSWORD` in `.env` before running `npm run seed`). All `/api/*` routes except register/login
+require the bearer token; the app logs in on first start.
 
 Stop the database:
 

@@ -17,8 +17,8 @@ export default async function timelineRoutes(app) {
       return reply.code(400).send({ error: 'source_id must be a valid uuid' });
     }
     const { rows } = await query(
-      'SELECT * FROM media_timeline($1, COALESCE($2, now()), $3)',
-      [from ?? null, to ?? null, sourceId ?? null],
+      'SELECT * FROM media_timeline($1, COALESCE($2, now()), $3, $4)',
+      [from ?? null, to ?? null, sourceId ?? null, request.user.id],
     );
     return {
       buckets: rows.map((row) => ({
@@ -41,7 +41,7 @@ export default async function timelineRoutes(app) {
     }
     const limitValue = Math.min(Math.max(Number(limit ?? 200), 1), 500);
     const offsetValue = Math.max(Number(offset ?? 0), 0);
-    const params = [from, to];
+    const params = [from, to, request.user.id];
     let sourceClause = '';
     if (sourceId) {
       params.push(sourceId);
@@ -53,6 +53,7 @@ export default async function timelineRoutes(app) {
        FROM media_items m
        JOIN sources s ON s.id = m.source_id
        WHERE m.taken_at >= $1 AND m.taken_at < $2
+       AND s.owner_id = $3
        ${sourceClause}
        ORDER BY m.taken_at DESC, m.indexed_at DESC
        LIMIT $${params.length - 1} OFFSET $${params.length}`,

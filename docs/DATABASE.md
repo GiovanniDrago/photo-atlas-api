@@ -6,6 +6,21 @@ free plan with `supabase db push`.
 
 ## Tables
 
+### `users` and `sessions`
+
+Local authentication for this development phase (no email, no verification).
+
+| Table | Columns |
+|---|---|
+| `users` | `id`, `username` (unique case-insensitive), `password_hash` (scrypt salt:hash), `created_at` |
+| `sessions` | `id`, `user_id`, `token_hash` (SHA-256 of the bearer token), `created_at`, `expires_at` (30 days), `last_used_at` |
+
+Every other data table is tied to a user through `sources.owner_id`: sources, media items, scan runs
+and kDrive accounts are only readable by their owner. `kdrive_accounts` has a unique index on
+`owner_id` (one connection per user). When moving to Supabase cloud, `users` can be replaced by
+Supabase Auth and `owner_id` pointed at `auth.users(id)`; the RLS example in
+[SUPABASE_CLOUD.md](SUPABASE_CLOUD.md) already assumes that shape.
+
 ### `sources`
 
 Where media comes from.
@@ -19,8 +34,9 @@ Where media comes from.
 | `kdrive_drive_id` | bigint | kDrive drive id (kdrive only) |
 | `kdrive_folder_id` | bigint | kDrive folder id (kdrive only) |
 | `created_at` / `last_scan_at` | timestamptz | bookkeeping |
+| `owner_id` | uuid | FK to `users`, cascade delete |
 
-Unique on `(kdrive_drive_id, kdrive_folder_id)` for kdrive sources.
+Unique on `(owner_id, kdrive_drive_id, kdrive_folder_id)` for kdrive sources.
 
 ### `media_items`
 
