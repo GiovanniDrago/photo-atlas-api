@@ -23,6 +23,14 @@ export function mediaTypeOf(name, mime) {
   return null;
 }
 
+export function buildChildQuery({ type, cursor, limit } = {}) {
+  const search = new URLSearchParams();
+  if (type) search.set('type[]', type);
+  if (cursor) search.set('cursor', cursor);
+  if (limit) search.set('limit', String(limit));
+  return search.toString();
+}
+
 export class KDriveClient {
   constructor({ token, driveId, baseUrl = 'https://api.infomaniak.com', minIntervalMs = DEFAULT_MIN_INTERVAL_MS }) {
     this.token = token;
@@ -73,9 +81,11 @@ export class KDriveClient {
   }
 
   async listChildren(fileId, { type, cursor, limit = 100 } = {}) {
-    const body = await this.requestJson(`/3/drive/${this.driveId}/files/${fileId}/files`, {
-      query: { type, cursor, limit },
-    });
+    const query = buildChildQuery({ type, cursor, limit });
+    const suffix = query ? `?${query}` : '';
+    const body = await this.requestJson(
+      `/3/drive/${this.driveId}/files/${fileId}/files${suffix}`,
+    );
     return {
       items: body.data ?? [],
       cursor: body.cursor ?? null,

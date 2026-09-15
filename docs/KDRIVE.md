@@ -21,7 +21,7 @@ encrypted in the database and only used server-side, so the Flutter client never
 |---|---|
 | Validate token and drive | `GET /2/drive/{drive_id}` |
 | Folder/file metadata | `GET /3/drive/{drive_id}/files/{file_id}` (root = `1`) |
-| List a folder | `GET /3/drive/{drive_id}/files/{file_id}/files?cursor=&type=file\|dir` |
+| List a folder | `GET /3/drive/{drive_id}/files/{file_id}/files?cursor=&type[]=file\|dir` |
 | Search | `GET /3/drive/{drive_id}/files/search?query=&directory_id=&depth=` |
 | Download bytes | `GET /2/drive/{drive_id}/files/{file_id}/download` |
 | Thumbnail (best effort) | `GET /2/drive/{drive_id}/files/{file_id}/thumbnail?width=256` |
