@@ -1,7 +1,8 @@
 # HTTP API
 
 Base URL: `http://localhost:8787`. All responses are JSON. Errors use `{ "error": "..." }` with an
-appropriate status code.
+appropriate status code. Numeric columns (`bigint`, `numeric`) are serialized as JSON numbers, not
+strings.
 
 ## Authentication
 

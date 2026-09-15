@@ -1,4 +1,5 @@
 import pg from 'pg';
+import './lib/pg-types.js';
 import { config } from './config.js';
 
 export const pool = new pg.Pool({

@@ -1,9 +1,21 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import pg from 'pg';
+import '../src/lib/pg-types.js';
 
 const databaseUrl = process.env.DATABASE_URL;
 const skip = databaseUrl ? false : 'DATABASE_URL is not set';
+
+test('bigint and numeric columns are returned as numbers', { skip }, async (t) => {
+  const pool = new pg.Pool({ connectionString: databaseUrl });
+  t.after(async () => pool.end());
+  const { rows } = await pool.query(
+    'SELECT 9007199254740991::bigint AS big, 12.5::numeric AS num',
+  );
+  assert.equal(typeof rows[0].big, 'number');
+  assert.equal(typeof rows[0].num, 'number');
+  assert.equal(rows[0].num, 12.5);
+});
 
 async function withTestSource(pool, callback) {
   const source = await pool.query(
