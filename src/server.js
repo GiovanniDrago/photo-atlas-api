@@ -4,6 +4,7 @@ import cors from '@fastify/cors';
 import { config } from './config.js';
 import { pool } from './db.js';
 import { corsOptions } from './lib/cors.js';
+import { registerJsonBodyParser } from './lib/json-body-parser.js';
 import { registerAuthHook } from './lib/auth.js';
 import healthRoutes from './routes/health.js';
 import authRoutes from './routes/auth.js';
@@ -18,6 +19,8 @@ const app = Fastify({
   logger: { level: process.env.LOG_LEVEL ?? 'info' },
   bodyLimit: 32 * 1024 * 1024,
 });
+
+registerJsonBodyParser(app);
 
 await app.register(cors, corsOptions);
 
