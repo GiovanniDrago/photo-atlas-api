@@ -179,7 +179,10 @@ curl -X POST http://localhost:8787/api/kdrive/connect \
 curl http://localhost:8787/api/kdrive/status
 curl 'http://localhost:8787/api/kdrive/folders?parent_id=1'
 curl -X POST http://localhost:8787/api/kdrive/scan \
-  -H 'Content-Type: application/json' -d '{"folder_id":42,"recursive":true}'
+  -H 'Content-Type: application/json' \
+  -d '{"folder_id":42,"include_subfolders":true,"label":"kDrive: Photos/Trips"}'
+curl -X PATCH http://localhost:8787/api/sources/<source-uuid> \
+  -H 'Content-Type: application/json' -d '{"include_subfolders":false}'
 curl -X POST http://localhost:8787/api/kdrive/enrich \
   -H 'Content-Type: application/json' -d '{"limit":50}'
 curl http://localhost:8787/api/kdrive/enrich

@@ -39,14 +39,18 @@ export default async function sourceRoutes(app) {
       `UPDATE sources SET
          label = COALESCE($2, label),
          root_path = COALESCE($3, root_path),
-         last_scan_at = COALESCE($4, last_scan_at)
-       WHERE id = $1 AND owner_id = $5
+         last_scan_at = COALESCE($4, last_scan_at),
+         include_subfolders = COALESCE($5, include_subfolders)
+       WHERE id = $1 AND owner_id = $6
        RETURNING *`,
       [
         request.params.id,
         request.body?.label ?? null,
         request.body?.root_path ?? null,
         request.body?.last_scan_at ?? null,
+        typeof request.body?.include_subfolders === 'boolean'
+          ? request.body.include_subfolders
+          : null,
         request.user.id,
       ],
     );

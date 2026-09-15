@@ -36,20 +36,33 @@ takes roughly 90 seconds of listing plus one request per folder.
 
 ## Scan flow
 
+Scanning is **folder by folder**: the app lets the user browse the drive and add one folder at a
+time; each added folder becomes its own `source` with a stored `include_subfolders` choice.
+
 ```
-POST /api/kdrive/scan { folder_id, recursive }
+POST /api/kdrive/scan { folder_id, include_subfolders, label }
         |
-        +--> 202 { scan_run_id }          (returns immediately)
+        +--> 202 { scan_run_id, source_id }   (returns immediately)
         |
-        +--> background walkFiles(folder_id)
+        +--> background walk from folder_id
                 -> directory listing pages (throttled)
                 -> map files to media rows
                 -> upsert batches of 100
                 -> update scan_runs counters every 25 files
 ```
 
-`metadata_status` is `none` after a scan because the kDrive listing does not include capture date or
-GPS. The client shows this progress through `GET /api/scan-runs/:id`.
+- `include_subfolders: true` walks the whole subtree below the chosen folder; `false` indexes only
+  the files directly inside it. The value is persisted on the source and reused by "scan again",
+  until the user toggles it.
+- Re-adding the same folder updates its label and flag instead of creating a duplicate source
+  (unique on owner + drive + folder).
+- Scanning folder `1` (root) indexes the entire drive; the app shows a warning before doing it.
+- `metadata_status` is `none` after a scan because the kDrive listing does not include capture date
+  or GPS. The client shows this progress through `GET /api/scan-runs/:id`.
+
+Deleting a source from the app removes only the local index (`sources`, its `media_items` and
+`scan_runs` rows, via database cascade). **No kDrive file is ever touched**: the integration only
+performs GET requests, and the delete handler does not contact kDrive at all.
 
 ## Enrichment flow
 

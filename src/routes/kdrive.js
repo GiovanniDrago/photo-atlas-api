@@ -45,19 +45,25 @@ function mapFile(file) {
   };
 }
 
-async function ensureSource(label, driveId, folderId, ownerId) {
+async function ensureSource(label, driveId, folderId, ownerId, includeSubfolders) {
   const { rows } = await query(
     `SELECT * FROM sources
      WHERE kind = 'kdrive' AND kdrive_drive_id = $1 AND kdrive_folder_id = $2 AND owner_id = $3
      LIMIT 1`,
     [driveId, folderId, ownerId],
   );
-  if (rows.length > 0) return rows[0];
+  if (rows.length > 0) {
+    const updated = await query(
+      `UPDATE sources SET label = $2, include_subfolders = $3 WHERE id = $1 RETURNING *`,
+      [rows[0].id, label, includeSubfolders],
+    );
+    return updated.rows[0];
+  }
   const inserted = await query(
-    `INSERT INTO sources (kind, label, kdrive_drive_id, kdrive_folder_id, owner_id)
-     VALUES ('kdrive', $1, $2, $3, $4)
+    `INSERT INTO sources (kind, label, kdrive_drive_id, kdrive_folder_id, owner_id, include_subfolders)
+     VALUES ('kdrive', $1, $2, $3, $4, $5)
      RETURNING *`,
-    [label, driveId, folderId, ownerId],
+    [label, driveId, folderId, ownerId, includeSubfolders],
   );
   return inserted.rows[0];
 }
@@ -270,15 +276,23 @@ export default async function kdriveRoutes(app) {
   });
 
   app.post('/api/kdrive/scan', async (request, reply) => {
-    const { folder_id: folderId, recursive = true, label } = request.body ?? {};
+    const {
+      folder_id: folderId,
+      recursive,
+      include_subfolders: includeSubfolders,
+      label,
+    } = request.body ?? {};
     if (!folderId) return reply.code(400).send({ error: 'folder_id is required' });
     const { account, client } = await getKDriveClient(request.user.id);
     const folder = await client.getFile(folderId);
+    const includeValue = includeSubfolders ?? recursive ?? true;
+    const folderName = Number(folderId) === 1 || !folder?.name ? 'Root' : folder.name;
     const source = await ensureSource(
-      label ?? `${account.label}: ${folder?.name ?? `folder ${folderId}`}`,
+      label ?? `${account.label}: ${folderName}`,
       account.drive_id,
       folderId,
       request.user.id,
+      Boolean(includeValue),
     );
     const run = await query('INSERT INTO scan_runs (source_id) VALUES ($1) RETURNING *', [source.id]);
     setImmediate(() => {
@@ -287,10 +301,14 @@ export default async function kdriveRoutes(app) {
         sourceId: source.id,
         client,
         folderId,
-        recursive: Boolean(recursive),
+        recursive: Boolean(includeValue),
       }).catch(() => {});
     });
-    return reply.code(202).send({ scan_run_id: run.rows[0].id, source_id: source.id });
+    return reply.code(202).send({
+      scan_run_id: run.rows[0].id,
+      source_id: source.id,
+      include_subfolders: Boolean(includeValue),
+    });
   });
 
   app.post('/api/kdrive/enrich', async (request, reply) => {

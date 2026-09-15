@@ -35,6 +35,7 @@ Where media comes from.
 | `kdrive_folder_id` | bigint | kDrive folder id (kdrive only) |
 | `created_at` / `last_scan_at` | timestamptz | bookkeeping |
 | `owner_id` | uuid | FK to `users`, cascade delete |
+| `include_subfolders` | boolean | kDrive sources: scan the whole subtree or only direct files |
 
 Unique on `(owner_id, kdrive_drive_id, kdrive_folder_id)` for kdrive sources.
 
