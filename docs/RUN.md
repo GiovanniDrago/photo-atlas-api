@@ -19,17 +19,17 @@ bash scripts/dev-urls.sh
 
 ```
 Photo Atlas development URLs
-  VM IP:        10.30.127.225
+  VM IP:        <vm-ip>
   API (here):   http://localhost:8787
-  API (phone):  http://10.30.127.225:8787
+  API (phone):  http://<vm-ip>:8787
   API status:   online
-  Web (phone):  http://10.30.127.225:8080/photo-atlas-app/
+  Web (phone):  http://<vm-ip>:8080/photo-atlas-app/
 ```
 
 The API also prints every reachable URL on startup, for example:
 
 ```
-Photo Atlas API ready: http://localhost:8787  |  http://10.30.127.225:8787
+Photo Atlas API ready: http://localhost:8787  |  http://<vm-ip>:8787
 ```
 
 The VM IP comes from DHCP and can change when the VM restarts; the web app detects its own host
