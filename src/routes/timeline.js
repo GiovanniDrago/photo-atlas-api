@@ -1,4 +1,5 @@
 import { query } from '../db.js';
+import { withAssetUrls } from '../lib/signed-url.js';
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -60,7 +61,7 @@ export default async function timelineRoutes(app) {
       params,
     );
     return {
-      items: rows,
+      items: rows.map((row) => withAssetUrls(row, `${request.protocol}://${request.headers.host}`)),
       total: rows.length > 0 ? Number(rows[0].total) : 0,
       limit: limitValue,
       offset: offsetValue,

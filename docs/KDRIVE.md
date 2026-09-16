@@ -64,6 +64,21 @@ Deleting a source from the app removes only the local index (`sources`, its `med
 `scan_runs` rows, via database cascade). **No kDrive file is ever touched**: the integration only
 performs GET requests, and the delete handler does not contact kDrive at all.
 
+## Previews
+
+After a scan completes, the API starts a background job that generates and caches a small preview
+for every newly indexed item that does not have one yet (`thumb_path`):
+
+- requires **no extra kDrive calls per view**: each preview is fetched once (320 px thumbnail) and
+  stored under `MEDIA_CACHE_DIR` (default `~/.cache/photo-atlas/thumbs`)
+- runs at the same 60 req/min pace, so it continues for a while after the scan message says
+  "complete"
+- progress and errors: `GET /api/kdrive/previews`; manual run for everything still missing:
+  `POST /api/kdrive/previews`
+
+Views then hit the local cache and are served with long cache headers, so the browser/app keeps
+them too.
+
 ## Enrichment flow
 
 ```

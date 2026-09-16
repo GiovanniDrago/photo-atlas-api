@@ -141,4 +141,8 @@ export class KDriveClient {
   async fetchThumbnail(fileId, width = 256) {
     return this.requestStream(`/2/drive/${this.driveId}/files/${fileId}/thumbnail?width=${width}`);
   }
+
+  async download(fileId) {
+    return this.requestStream(`/2/drive/${this.driveId}/files/${fileId}/download`);
+  }
 }

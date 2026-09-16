@@ -13,6 +13,7 @@
     "start": "node src/server.js",
     "migrate": "node scripts/migrate.js",
     "seed": "node scripts/seed.js",
+    "reset-password": "node scripts/reset-password.js",
     "db:local": "bash scripts/db-local.sh",
     "test": "node --test test/"
   },

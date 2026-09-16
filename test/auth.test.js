@@ -18,6 +18,58 @@ test('password hashing verifies and rejects', () => {
   assert.equal(verifyPassword('secret', 'garbage'), false);
 });
 
+test('change password requires the current one and revokes other sessions', { skip }, async (t) => {
+  const suffix = crypto.randomBytes(4).toString('hex');
+  const username = `carol_${suffix}`;
+  const pool = new pg.Pool({ connectionString: databaseUrl });
+  t.after(async () => {
+    await pool.query('DELETE FROM users WHERE lower(username) = lower($1)', [username]);
+    await pool.end();
+  });
+  const app = Fastify();
+  registerAuthHook(app);
+  await app.register(authRoutes);
+  t.after(async () => app.close());
+
+  const register = await app.inject({
+    method: 'POST',
+    url: '/api/auth/register',
+    payload: { username, password: 'oldpw' },
+  });
+  assert.equal(register.statusCode, 201);
+  const token = register.json().token;
+
+  const wrong = await app.inject({
+    method: 'POST',
+    url: '/api/auth/change-password',
+    headers: { authorization: `Bearer ${token}` },
+    payload: { current_password: 'nope', new_password: 'newpw' },
+  });
+  assert.equal(wrong.statusCode, 403);
+
+  const ok = await app.inject({
+    method: 'POST',
+    url: '/api/auth/change-password',
+    headers: { authorization: `Bearer ${token}` },
+    payload: { current_password: 'oldpw', new_password: 'newpw' },
+  });
+  assert.equal(ok.statusCode, 200);
+
+  const oldLogin = await app.inject({
+    method: 'POST',
+    url: '/api/auth/login',
+    payload: { username, password: 'oldpw' },
+  });
+  assert.equal(oldLogin.statusCode, 401);
+
+  const newLogin = await app.inject({
+    method: 'POST',
+    url: '/api/auth/login',
+    payload: { username, password: 'newpw' },
+  });
+  assert.equal(newLogin.statusCode, 200);
+});
+
 test('register, login, me, logout and data isolation', { skip }, async (t) => {
   const suffix = crypto.randomBytes(4).toString('hex');
   const userA = `alice_${suffix}`;

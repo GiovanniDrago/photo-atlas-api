@@ -4,6 +4,18 @@ Base URL: `http://localhost:8787`. All responses are JSON. Errors use `{ "error"
 appropriate status code. Numeric columns (`bigint`, `numeric`) are serialized as JSON numbers, not
 strings.
 
+## Asset URLs (thumbnail and original download)
+
+Media payloads include two pre-signed absolute URLs:
+
+| Field | Endpoint | Purpose |
+|---|---|---|
+| `thumbnail_url` | `GET /api/media/:id/thumbnail?m=…&s=…` | small preview (kDrive thumbnails are cached on disk) |
+| `download_url` | `GET /api/media/:id/download?m=…&s=…` | original file at full quality |
+
+The signature is a stable HMAC of the media id (no expiry in this dev phase), so the URLs are safe
+for `<img>` tags and browser caching. Requests without a valid signature get `401`.
+
 ## Authentication
 
 Every `/api/*` route except `register` and `login` requires a session token:
@@ -30,7 +42,15 @@ curl http://localhost:8787/api/auth/me -H "Authorization: Bearer <token>"
 
 # revoke the session
 curl -X POST http://localhost:8787/api/auth/logout -H "Authorization: Bearer <token>"
+
+# change the password (revokes every other session)
+curl -X POST http://localhost:8787/api/auth/change-password \
+  -H "Authorization: Bearer <token>" -H 'Content-Type: application/json' \
+  -d '{"current_password":"old","new_password":"new"}'
 ```
+
+Forgotten passwords have no email flow in this dev phase: run
+`npm run reset-password -- <username> [new_password]` on the server (revokes all sessions).
 
 Both endpoints return `{ "user": {...}, "token": "...", "expires_at": "..." }`. Registration is
 open, passwords are hashed with scrypt, and the raw token is never stored server side (only its

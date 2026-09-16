@@ -1,32 +1,13 @@
 import { query } from '../db.js';
 import { config } from '../config.js';
-import { encryptSecret, decryptSecret } from '../lib/crypto.js';
+import { encryptSecret } from '../lib/crypto.js';
 import { KDriveClient, mediaTypeOf } from '../services/kdrive.js';
+import { getKDriveClient } from '../services/kdrive-account.js';
+import { ensureThumbnail } from '../services/media-assets.js';
 import { extractImageMetadata, computeMetadataStatus } from '../services/enrich.js';
 import { upsertMediaItems, updateScanRun } from '../services/media-index.js';
 
 const BATCH_SIZE = 100;
-
-export async function getKDriveClient(userId) {
-  const { rows } = await query(
-    'SELECT * FROM kdrive_accounts WHERE owner_id = $1 ORDER BY created_at ASC LIMIT 1',
-    [userId],
-  );
-  if (rows.length === 0) {
-    const error = new Error('kDrive account is not connected');
-    error.statusCode = 409;
-    throw error;
-  }
-  const account = rows[0];
-  const token = decryptSecret(
-    { cipher: account.token_cipher, iv: account.token_iv, tag: account.token_tag },
-    config.kdriveEncKey,
-  );
-  return {
-    account,
-    client: new KDriveClient({ token, driveId: Number(account.drive_id), baseUrl: config.kdriveApiBase }),
-  };
-}
 
 function mapFile(file) {
   const mediaType = mediaTypeOf(file.name ?? '', file.mime_type ?? file.mime ?? null);
@@ -68,7 +49,7 @@ async function ensureSource(label, driveId, folderId, ownerId, includeSubfolders
   return inserted.rows[0];
 }
 
-async function runScan({ scanRunId, sourceId, client, folderId, recursive }) {
+async function runScan({ scanRunId, sourceId, ownerId, client, folderId, recursive }) {
   let filesSeen = 0;
   let filesIndexed = 0;
   let filesSkipped = 0;
@@ -125,6 +106,9 @@ async function runScan({ scanRunId, sourceId, client, folderId, recursive }) {
       files_skipped: filesSkipped,
       errors,
     });
+    setImmediate(() => {
+      runPreviews(ownerId, { sourceId }).catch(() => {});
+    });
   } catch (error) {
     await updateScanRun(scanRunId, {
       status: 'failed',
@@ -137,7 +121,6 @@ async function runScan({ scanRunId, sourceId, client, folderId, recursive }) {
 }
 
 const enrichStates = new Map();
-
 function enrichStateFor(userId) {
   let state = enrichStates.get(userId);
   if (!state) {
@@ -194,6 +177,75 @@ async function runEnrichment(userId, limit) {
         state.updated += 1;
       } catch (error) {
         state.errors.push(`${row.name}: ${error.message}`);
+      }
+      state.processed += 1;
+    }
+  } catch (error) {
+    state.errors.push(String(error.message));
+  } finally {
+    state.running = false;
+    state.finished_at = new Date().toISOString();
+  }
+}
+
+const previewStates = new Map();
+
+function previewStateFor(userId) {
+  let state = previewStates.get(userId);
+  if (!state) {
+    state = {
+      running: false,
+      processed: 0,
+      updated: 0,
+      skipped: 0,
+      errors: [],
+      started_at: null,
+      finished_at: null,
+    };
+    previewStates.set(userId, state);
+  }
+  return state;
+}
+
+async function runPreviews(userId, { sourceId } = {}) {
+  const state = previewStateFor(userId);
+  if (state.running) return;
+  state.running = true;
+  state.processed = 0;
+  state.updated = 0;
+  state.skipped = 0;
+  state.errors = [];
+  state.started_at = new Date().toISOString();
+  state.finished_at = null;
+  try {
+    const params = [userId];
+    let sourceFilter = '';
+    if (sourceId) {
+      params.push(sourceId);
+      sourceFilter = `AND m.source_id = $${params.length}`;
+    }
+    const { rows } = await query(
+      `SELECT m.*, s.kind AS source_kind, s.owner_id
+       FROM media_items m
+       JOIN sources s ON s.id = m.source_id
+       WHERE s.owner_id = $1 AND s.kind = 'kdrive'
+         AND (m.thumb_path IS NULL OR m.thumb_path = '')
+         ${sourceFilter}
+       ORDER BY m.indexed_at ASC
+       LIMIT 5000`,
+      params,
+    );
+    for (const row of rows) {
+      try {
+        const result = await ensureThumbnail(row);
+        if (result) {
+          state.updated += 1;
+        } else {
+          state.skipped += 1;
+        }
+      } catch (error) {
+        state.errors.push(`${row.name}: ${error.message}`);
+        state.skipped += 1;
       }
       state.processed += 1;
     }
@@ -299,6 +351,7 @@ export default async function kdriveRoutes(app) {
       runScan({
         scanRunId: run.rows[0].id,
         sourceId: source.id,
+        ownerId: request.user.id,
         client,
         folderId,
         recursive: Boolean(includeValue),
@@ -324,4 +377,17 @@ export default async function kdriveRoutes(app) {
   });
 
   app.get('/api/kdrive/enrich', async (request) => enrichStateFor(request.user.id));
+
+  app.post('/api/kdrive/previews', async (request, reply) => {
+    const state = previewStateFor(request.user.id);
+    if (state.running) {
+      return reply.code(409).send({ error: 'previews_already_running', state });
+    }
+    setImmediate(() => {
+      runPreviews(request.user.id).catch(() => {});
+    });
+    return reply.code(202).send({ queued: true });
+  });
+
+  app.get('/api/kdrive/previews', async (request) => previewStateFor(request.user.id));
 }

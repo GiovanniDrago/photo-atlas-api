@@ -1,9 +1,10 @@
 import fs from 'node:fs';
-import path from 'node:path';
 import { query } from '../db.js';
 import { config } from '../config.js';
+import { withAssetUrls, verifyAssetSignature } from '../lib/signed-url.js';
+import { ensureThumbnail } from '../services/media-assets.js';
+import { getKDriveClient } from '../services/kdrive-account.js';
 import { upsertMediaItems, updateScanRun } from '../services/media-index.js';
-import { getKDriveClient } from './kdrive.js';
 
 const BASE_FIELDS = `
   m.id, m.source_id, m.external_key, m.path, m.name, m.mime, m.media_type,
@@ -23,6 +24,14 @@ function clamp(value, min, max) {
   return Math.min(Math.max(value, min), max);
 }
 
+function baseUrlOf(request) {
+  return `${request.protocol}://${request.headers.host}`;
+}
+
+function serialize(row, request) {
+  return withAssetUrls(row, baseUrlOf(request));
+}
+
 function isAllowedLocalPath(filePath) {
   if (!filePath) return false;
   let real;
@@ -35,9 +44,9 @@ function isAllowedLocalPath(filePath) {
   return config.localMediaRoots.some((root) => real.startsWith(fs.realpathSync(root)));
 }
 
-function streamFile(reply, filePath, mime) {
+function streamFile(reply, filePath, mime, cacheSeconds = 604800) {
   reply.header('Content-Type', mime ?? 'application/octet-stream');
-  reply.header('Cache-Control', 'public, max-age=86400');
+  reply.header('Cache-Control', `public, max-age=${cacheSeconds}`);
   return reply.send(fs.createReadStream(filePath));
 }
 
@@ -91,7 +100,7 @@ export default async function mediaRoutes(app) {
     );
 
     return {
-      items: rows,
+      items: rows.map((row) => serialize(row, request)),
       total: rows.length > 0 ? Number(rows[0].total) : 0,
       limit,
       offset,
@@ -136,20 +145,34 @@ export default async function mediaRoutes(app) {
       [request.params.id, request.user.id],
     );
     if (rows.length === 0) return reply.code(404).send({ error: 'not_found' });
-    return { item: rows[0] };
+    return { item: serialize(rows[0], request) };
   });
 
   app.get('/api/media/:id/thumbnail', async (request, reply) => {
-    if (!isUuid(request.params.id)) return reply.code(400).send({ error: 'invalid id' });
+    const mediaId = request.params.id;
+    if (!isUuid(mediaId)) return reply.code(400).send({ error: 'invalid id' });
+    if (!verifyAssetSignature('thumb', mediaId, request.query?.s)) {
+      return reply.code(401).send({ error: 'invalid signature' });
+    }
+
     const { rows } = await query(
-      `SELECT m.*, s.kind AS source_kind
+      `SELECT m.*, s.kind AS source_kind, s.owner_id
        FROM media_items m
        JOIN sources s ON s.id = m.source_id
-       WHERE m.id = $1 AND s.owner_id = $2`,
-      [request.params.id, request.user.id],
+       WHERE m.id = $1`,
+      [mediaId],
     );
     if (rows.length === 0) return reply.code(404).send({ error: 'not_found' });
     const item = rows[0];
+
+    const cached = await ensureThumbnail(item).catch((error) => {
+      request.log.warn({ err: error.message }, 'thumbnail cache failed');
+      return null;
+    });
+    if (cached) {
+      reply.header('ETag', `"${item.id}-${item.updated_at?.toISOString?.() ?? ''}"`);
+      return streamFile(reply, cached.path, cached.contentType);
+    }
 
     if (item.thumb_path && fs.existsSync(item.thumb_path)) {
       return streamFile(reply, item.thumb_path, item.mime);
@@ -161,17 +184,11 @@ export default async function mediaRoutes(app) {
 
     if (item.source_kind === 'kdrive' && item.external_key) {
       try {
-        const { client } = await getKDriveClient();
-        const response = await client.fetchThumbnail(item.external_key);
-        if (response.ok) {
-          const buffer = Buffer.from(await response.arrayBuffer());
-          reply.header('Content-Type', response.headers.get('content-type') ?? 'image/jpeg');
-          reply.header('Cache-Control', 'public, max-age=86400');
-          return reply.send(buffer);
-        }
+        const { client } = await getKDriveClient(item.owner_id);
         const fallback = await client.readPrefix(item.external_key, 2 * 1024 * 1024);
         if (fallback.length > 0) {
           reply.header('Content-Type', item.mime ?? 'image/jpeg');
+          reply.header('Cache-Control', 'public, max-age=86400');
           return reply.send(fallback);
         }
       } catch (error) {
@@ -180,5 +197,48 @@ export default async function mediaRoutes(app) {
     }
 
     return reply.code(404).send({ error: 'thumbnail_unavailable' });
+  });
+
+  app.get('/api/media/:id/download', async (request, reply) => {
+    const mediaId = request.params.id;
+    if (!isUuid(mediaId)) return reply.code(400).send({ error: 'invalid id' });
+    if (!verifyAssetSignature('download', mediaId, request.query?.s)) {
+      return reply.code(401).send({ error: 'invalid signature' });
+    }
+
+    const { rows } = await query(
+      `SELECT m.*, s.kind AS source_kind, s.owner_id
+       FROM media_items m
+       JOIN sources s ON s.id = m.source_id
+       WHERE m.id = $1`,
+      [mediaId],
+    );
+    if (rows.length === 0) return reply.code(404).send({ error: 'not_found' });
+    const item = rows[0];
+    const filename = (item.name ?? 'download').replace(/["\r\n]/g, '_');
+
+    if (item.source_kind === 'kdrive' && item.external_key) {
+      try {
+        const { client } = await getKDriveClient(item.owner_id);
+        const response = await client.download(item.external_key);
+        if (!response.ok) throw new Error(`kDrive download failed (${response.status})`);
+        reply.header('Content-Type', item.mime ?? 'application/octet-stream');
+        reply.header('Content-Disposition', `attachment; filename="${filename}"`);
+        reply.header('Cache-Control', 'private, max-age=0');
+        const buffer = Buffer.from(await response.arrayBuffer());
+        return reply.send(buffer);
+      } catch (error) {
+        request.log.warn({ err: error.message }, 'kdrive download failed');
+        return reply.code(502).send({ error: 'download_failed' });
+      }
+    }
+
+    if (item.source_kind === 'local' && isAllowedLocalPath(item.path)) {
+      reply.header('Content-Type', item.mime ?? 'application/octet-stream');
+      reply.header('Content-Disposition', `attachment; filename="${filename}"`);
+      return reply.send(fs.createReadStream(item.path));
+    }
+
+    return reply.code(404).send({ error: 'file_unavailable' });
   });
 }

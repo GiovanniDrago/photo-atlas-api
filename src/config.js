@@ -1,3 +1,5 @@
+import os from 'node:os';
+import path from 'node:path';
 import 'dotenv/config';
 
 function splitRoots(value) {
@@ -14,6 +16,8 @@ export const config = {
   corsOrigin: process.env.CORS_ORIGIN ?? '*',
   kdriveEncKey: process.env.KDRIVE_ENC_KEY ?? '',
   kdriveApiBase: process.env.KDRIVE_API_BASE ?? 'https://api.infomaniak.com',
+  mediaUrlSecret: process.env.MEDIA_URL_SECRET ?? process.env.KDRIVE_ENC_KEY ?? 'photo-atlas-dev-secret',
+  mediaCacheDir: process.env.MEDIA_CACHE_DIR ?? path.join(os.homedir(), '.cache', 'photo-atlas'),
   localMediaRoots: splitRoots(process.env.LOCAL_MEDIA_ROOTS),
   maxBatchSize: 500,
 };

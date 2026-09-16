@@ -60,6 +60,24 @@ The seed creates a development account: **demo / demo** (override the password w
 `DEMO_PASSWORD` in `.env` before running `npm run seed`). All `/api/*` routes except register/login
 require the bearer token; the app logs in on first start.
 
+## Users
+
+```bash
+# change your own password from the app (Settings -> Account) or with a token
+curl -X POST http://localhost:8787/api/auth/change-password \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"current_password":"demo","new_password":"newpass"}'
+
+# forgotten password (server-side, no email in this dev phase)
+npm run reset-password -- demo
+npm run reset-password -- demo my-new-password
+```
+
+## Previews cache
+
+kDrive previews are cached under `MEDIA_CACHE_DIR` (default `~/.cache/photo-atlas`). Progress of the
+automatic delta job after each scan: `GET /api/kdrive/previews`.
+
 Stop the database:
 
 ```bash
