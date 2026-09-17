@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import { query } from '../db.js';
 import { config } from '../config.js';
 import { withAssetUrls, verifyAssetSignature } from '../lib/signed-url.js';
+import { isAllowedLocalPath } from '../lib/local-paths.js';
 import { ensureThumbnail } from '../services/media-assets.js';
 import { getKDriveClient } from '../services/kdrive-account.js';
 import { upsertMediaItems, updateScanRun } from '../services/media-index.js';
@@ -30,18 +31,6 @@ function baseUrlOf(request) {
 
 function serialize(row, request) {
   return withAssetUrls(row, baseUrlOf(request));
-}
-
-function isAllowedLocalPath(filePath) {
-  if (!filePath) return false;
-  let real;
-  try {
-    real = fs.realpathSync(filePath);
-  } catch {
-    return false;
-  }
-  if (config.localMediaRoots.length === 0) return true;
-  return config.localMediaRoots.some((root) => real.startsWith(fs.realpathSync(root)));
 }
 
 function streamFile(reply, filePath, mime, cacheSeconds = 604800) {

@@ -1,6 +1,8 @@
 import { query } from '../db.js';
+import { decodeThumbnailB64 } from '../lib/thumbnail-payload.js';
 import { computeMetadataStatus } from './enrich.js';
 import { mediaTypeOf } from './kdrive.js';
+import { writeThumbnail } from './media-assets.js';
 
 const INSERT_SQL = `
   INSERT INTO media_items (
@@ -39,7 +41,7 @@ const INSERT_SQL = `
     duration_s = COALESCE(EXCLUDED.duration_s, media_items.duration_s),
     thumb_path = COALESCE(EXCLUDED.thumb_path, media_items.thumb_path),
     updated_at = now()
-  RETURNING id
+  RETURNING id, external_key
 `;
 
 export function normalizeItem(item) {
@@ -71,8 +73,39 @@ export function normalizeItem(item) {
 export async function upsertMediaItems(sourceId, items) {
   if (!items || items.length === 0) return 0;
   const normalized = items.map(normalizeItem);
+  const thumbnails = new Map();
+  for (const item of items) {
+    const decoded = decodeThumbnailB64(item.thumbnail_b64);
+    if (!decoded) continue;
+    thumbnails.set(String(item.external_key ?? item.path ?? item.name), decoded);
+  }
   const { rows } = await query(INSERT_SQL, [sourceId, JSON.stringify(normalized)]);
+  if (thumbnails.size > 0) {
+    await storeThumbnails(rows, thumbnails);
+  }
   return rows.length;
+}
+
+async function storeThumbnails(rows, thumbnails) {
+  const updates = [];
+  for (const row of rows) {
+    const buffer = thumbnails.get(row.external_key);
+    if (!buffer) continue;
+    try {
+      const thumbPath = await writeThumbnail(row.id, buffer);
+      updates.push({ id: row.id, thumb_path: thumbPath });
+    } catch {
+      continue;
+    }
+  }
+  if (updates.length === 0) return;
+  await query(
+    `UPDATE media_items m
+     SET thumb_path = x.thumb_path, updated_at = now()
+     FROM jsonb_to_recordset($1::jsonb) AS x(id uuid, thumb_path text)
+     WHERE m.id = x.id`,
+    [JSON.stringify(updates)],
+  );
 }
 
 export async function updateScanRun(scanRunId, patch) {

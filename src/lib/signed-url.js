@@ -1,5 +1,6 @@
 import crypto from 'node:crypto';
 import { config } from '../config.js';
+import { isAllowedLocalPath } from './local-paths.js';
 
 function secret() {
   return config.mediaUrlSecret;
@@ -29,9 +30,11 @@ export function assetUrls(mediaId) {
 
 export function withAssetUrls(row, baseUrl) {
   const urls = assetUrls(row.id);
+  const downloadAvailable =
+    row.source_kind !== 'local' || isAllowedLocalPath(row.path);
   return {
     ...row,
     thumbnail_url: `${baseUrl}${urls.thumbnail_url}`,
-    download_url: `${baseUrl}${urls.download_url}`,
+    download_url: downloadAvailable ? `${baseUrl}${urls.download_url}` : null,
   };
 }

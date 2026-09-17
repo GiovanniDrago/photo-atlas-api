@@ -14,6 +14,15 @@ const EXT_BY_MIME = {
   'image/avif': '.avif',
 };
 
+const MIME_BY_EXT = {
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.png': 'image/png',
+  '.webp': 'image/webp',
+  '.gif': 'image/gif',
+  '.avif': 'image/avif',
+};
+
 export function thumbnailDir() {
   return path.join(config.mediaCacheDir, 'thumbs');
 }
@@ -22,9 +31,24 @@ function cacheFilePath(mediaId, contentType) {
   return path.join(thumbnailDir(), `${mediaId}${EXT_BY_MIME[contentType] ?? '.img'}`);
 }
 
+function cachedContentType(filePath, fallback) {
+  const ext = path.extname(filePath).toLowerCase();
+  return MIME_BY_EXT[ext] ?? fallback ?? 'image/jpeg';
+}
+
+export async function writeThumbnail(mediaId, buffer) {
+  await fsp.mkdir(thumbnailDir(), { recursive: true });
+  const filePath = cacheFilePath(mediaId, 'image/jpeg');
+  await fsp.writeFile(filePath, buffer);
+  return filePath;
+}
+
 export async function ensureThumbnail(item) {
   if (item.thumb_path && fs.existsSync(item.thumb_path)) {
-    return { path: item.thumb_path, contentType: item.mime ?? 'image/jpeg' };
+    return {
+      path: item.thumb_path,
+      contentType: cachedContentType(item.thumb_path, item.mime),
+    };
   }
   if (item.source_kind !== 'kdrive' || !item.external_key || !item.owner_id) {
     return null;

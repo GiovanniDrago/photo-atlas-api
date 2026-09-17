@@ -10,11 +10,15 @@ Media payloads include two pre-signed absolute URLs:
 
 | Field | Endpoint | Purpose |
 |---|---|---|
-| `thumbnail_url` | `GET /api/media/:id/thumbnail?m=…&s=…` | small preview (kDrive thumbnails are cached on disk) |
+| `thumbnail_url` | `GET /api/media/:id/thumbnail?m=…&s=…` | small preview (kDrive previews and phone-uploaded previews are cached on disk) |
 | `download_url` | `GET /api/media/:id/download?m=…&s=…` | original file at full quality |
 
 The signature is a stable HMAC of the media id (no expiry in this dev phase), so the URLs are safe
 for `<img>` tags and browser caching. Requests without a valid signature get `401`.
+
+`download_url` is `null` for `local` items whose file is not readable on the API host (for example
+media scanned from a phone album: the file lives on the device, not on the server). kDrive items and
+readable local files always carry a `download_url`.
 
 ## Authentication
 
@@ -115,7 +119,9 @@ curl -o thumb.jpg http://localhost:8787/api/media/<uuid>/thumbnail
 ```
 
 Local sources stream the original file when no thumbnail exists (restricted by
-`LOCAL_MEDIA_ROOTS`); kDrive sources are proxied through the API with the server-side token.
+`LOCAL_MEDIA_ROOTS`); kDrive sources are proxied through the API with the server-side token. Mobile
+scans seed the cache directly: `thumbnail_b64` items are written to `<cache>/thumbs/<media id>.jpg`
+and served from disk afterwards.
 
 ### Batch upsert (used by scans)
 
@@ -137,7 +143,8 @@ curl -X POST http://localhost:8787/api/media/batch \
         "lat": 45.0703,
         "lon": 7.6869,
         "width": 4032,
-        "height": 3024
+        "height": 3024,
+        "thumbnail_b64": "<base64 jpeg, optional>"
       }
     ]
   }'
@@ -145,6 +152,10 @@ curl -X POST http://localhost:8787/api/media/batch \
 
 `metadata_status` is derived automatically when omitted (date + GPS = `full`, one = `partial`,
 none = `none`). Maximum 500 items per request.
+
+`thumbnail_b64` is optional and used by the Android app, which uploads a 320 px JPEG preview
+(≤ 256 KB) per asset because the API cannot read files that only exist on the phone. Invalid or
+oversized payloads are ignored and the item is still indexed.
 
 ## Clusters (planet map)
 
