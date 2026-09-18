@@ -26,6 +26,8 @@ async function main() {
     const client = await pool.connect();
     try {
       await client.query('BEGIN');
+      // On Supabase the PostGIS functions live in the `extensions` schema.
+      await client.query('SET LOCAL search_path TO public, extensions, auth');
       await client.query(sql);
       await client.query('INSERT INTO schema_migrations (filename) VALUES ($1)', [file]);
       await client.query('COMMIT');

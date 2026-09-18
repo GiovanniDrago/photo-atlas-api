@@ -3,494 +3,321 @@ import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
 import Fastify from 'fastify';
 import pg from 'pg';
-import { hashPassword, verifyPassword, passwordPolicyError } from '../src/lib/passwords.js';
-import { registerAuthHook } from '../src/lib/auth.js';
-import { generateTotp } from '../src/lib/totp.js';
 import authRoutes from '../src/routes/auth.js';
-import sourceRoutes from '../src/routes/sources.js';
+import { registerAuthHook } from '../src/lib/supabase-auth.js';
+import { hashRecoveryCode } from '../src/lib/recovery-codes.js';
+import { startJwksServer, startFakeGoTrue, signToken } from './helpers/supabase-test-env.js';
 
-const databaseUrl = process.env.DATABASE_URL;
-const skip = databaseUrl ? false : 'DATABASE_URL is not set';
+const databaseUrl = process.env.TEST_DATABASE_URL;
+const skip = databaseUrl ? false : 'TEST_DATABASE_URL is not set';
 
-test('password hashing verifies and rejects', () => {
-  const stored = hashPassword('secret');
-  assert.equal(verifyPassword('secret', stored), true);
-  assert.equal(verifyPassword('wrong', stored), false);
-  assert.equal(verifyPassword('secret', 'garbage'), false);
+let jwks;
+let fakeGoTrue;
+let pool;
+
+test.before(async () => {
+  jwks = await startJwksServer();
+  fakeGoTrue = await startFakeGoTrue();
+  if (databaseUrl) pool = new pg.Pool({ connectionString: databaseUrl });
 });
 
-test('password policy requires length, email-free and non-common values', () => {
-  assert.match(passwordPolicyError('short'), /at least 10/);
-  assert.match(passwordPolicyError('x'.repeat(201)), /at most 200/);
-  assert.match(passwordPolicyError('alice-secret-pw', { email: 'alice@example.com' }), /email/);
-  assert.match(passwordPolicyError('password123', {}), /too common/);
-  assert.equal(passwordPolicyError('correct-horse-battery', { email: 'alice@example.com' }), null);
+test.after(async () => {
+  await jwks?.close();
+  await fakeGoTrue?.close();
+  await pool?.end();
 });
 
-test('change password requires the current one and revokes other sessions', { skip }, async (t) => {
-  const suffix = crypto.randomBytes(4).toString('hex');
-  const email = `carol_${suffix}@example.com`;
-  const pool = new pg.Pool({ connectionString: databaseUrl });
-  t.after(async () => {
-    await pool.query('DELETE FROM users WHERE lower(email) = lower($1)', [email]);
-    await pool.end();
-  });
+async function buildApp() {
   const app = Fastify();
   registerAuthHook(app);
   await app.register(authRoutes);
-  t.after(async () => app.close());
+  return app;
+}
 
-  const register = await app.inject({
-    method: 'POST',
-    url: '/api/auth/register',
-    payload: { email, password: 'oldpw-12345' },
-  });
-  assert.equal(register.statusCode, 201);
-  const token = register.json().token;
+async function createAuthUser(email) {
+  const { rows } = await pool.query(
+    'INSERT INTO auth.users (email, email_confirmed_at) VALUES ($1, now()) RETURNING id',
+    [email],
+  );
+  return rows[0].id;
+}
 
-  const wrong = await app.inject({
-    method: 'POST',
-    url: '/api/auth/change-password',
-    headers: { authorization: `Bearer ${token}` },
-    payload: { current_password: 'nope-12345', new_password: 'newpw-12345' },
-  });
-  assert.equal(wrong.statusCode, 403);
+async function cleanupUser(userId) {
+  await pool.query('DELETE FROM auth_events WHERE user_id = $1', [userId]);
+  await pool.query('DELETE FROM auth.users WHERE id = $1', [userId]);
+}
 
-  const weak = await app.inject({
-    method: 'POST',
-    url: '/api/auth/change-password',
-    headers: { authorization: `Bearer ${token}` },
-    payload: { current_password: 'oldpw-12345', new_password: 'short' },
-  });
-  assert.equal(weak.statusCode, 400);
+function uniqueEmail(prefix) {
+  return `${prefix}_${crypto.randomBytes(4).toString('hex')}@example.com`;
+}
 
-  const ok = await app.inject({
-    method: 'POST',
-    url: '/api/auth/change-password',
-    headers: { authorization: `Bearer ${token}` },
-    payload: { current_password: 'oldpw-12345', new_password: 'newpw-12345' },
-  });
-  assert.equal(ok.statusCode, 200);
+async function tokenFor(userId, email, extra = {}) {
+  return signToken({ sub: userId, email, privateKey: jwks.privateKey, kid: jwks.kid, ...extra });
+}
 
-  const oldLogin = await app.inject({
-    method: 'POST',
-    url: '/api/auth/login',
-    payload: { identifier: email, password: 'oldpw-12345' },
-  });
-  assert.equal(oldLogin.statusCode, 401);
-
-  const newLogin = await app.inject({
-    method: 'POST',
-    url: '/api/auth/login',
-    payload: { identifier: email, password: 'newpw-12345' },
-  });
-  assert.equal(newLogin.statusCode, 200);
+test('config endpoint exposes the public Supabase settings', async (t) => {
+  const app = await buildApp();
+  t.after(() => app.close());
+  const response = await app.inject({ method: 'GET', url: '/api/config' });
+  assert.equal(response.statusCode, 200);
+  const body = response.json();
+  assert.ok('supabase_url' in body);
+  assert.ok('supabase_publishable_key' in body);
+  assert.ok('email_confirm_redirect_url' in body);
 });
 
-test('register, login, me, logout and data isolation', { skip }, async (t) => {
-  const suffix = crypto.randomBytes(4).toString('hex');
-  const emailA = `alice_${suffix}@example.com`;
-  const emailB = `bob_${suffix}@example.com`;
+test('protected routes reject missing, invalid and non-user tokens', async (t) => {
+  const app = await buildApp();
+  t.after(() => app.close());
 
-  const pool = new pg.Pool({ connectionString: databaseUrl });
-  t.after(async () => {
-    await pool.query('DELETE FROM users WHERE lower(email) IN (lower($1), lower($2))', [emailA, emailB]);
-    await pool.end();
-  });
+  const missing = await app.inject({ method: 'GET', url: '/api/auth/me' });
+  assert.equal(missing.statusCode, 401);
 
-  const app = Fastify();
-  registerAuthHook(app);
-  await app.register(authRoutes);
-  await app.register(sourceRoutes);
-  t.after(async () => app.close());
-
-  const registerA = await app.inject({
-    method: 'POST',
-    url: '/api/auth/register',
-    payload: { email: emailA, password: 'alice-pw-1234' },
-  });
-  assert.equal(registerA.statusCode, 201);
-  const tokenA = registerA.json().token;
-  assert.ok(tokenA);
-  assert.equal(registerA.json().user.email, emailA);
-  assert.equal(registerA.json().recovery_codes.password.length, 8);
-  assert.equal(registerA.json().recovery_codes.mfa.length, 8);
-
-  const duplicate = await app.inject({
-    method: 'POST',
-    url: '/api/auth/register',
-    payload: { email: emailA.toUpperCase(), password: 'alice-pw-1234' },
-  });
-  assert.equal(duplicate.statusCode, 409);
-
-  const badEmail = await app.inject({
-    method: 'POST',
-    url: '/api/auth/register',
-    payload: { email: 'not-an-email', password: 'alice-pw-1234' },
-  });
-  assert.equal(badEmail.statusCode, 400);
-
-  const badLogin = await app.inject({
-    method: 'POST',
-    url: '/api/auth/login',
-    payload: { identifier: emailA, password: 'nope-1234' },
-  });
-  assert.equal(badLogin.statusCode, 401);
-
-  const loginA = await app.inject({
-    method: 'POST',
-    url: '/api/auth/login',
-    payload: { identifier: emailA, password: 'alice-pw-1234' },
-  });
-  assert.equal(loginA.statusCode, 200);
-  assert.equal(loginA.json().mfa_required, false);
-  const sessionToken = loginA.json().token;
-
-  const username = registerA.json().user.username;
-  const loginByUsername = await app.inject({
-    method: 'POST',
-    url: '/api/auth/login',
-    payload: { identifier: username, password: 'alice-pw-1234' },
-  });
-  assert.equal(loginByUsername.statusCode, 200);
-
-  const unauth = await app.inject({ method: 'GET', url: '/api/sources' });
-  assert.equal(unauth.statusCode, 401);
-
-  const me = await app.inject({
+  const garbage = await app.inject({
     method: 'GET',
     url: '/api/auth/me',
-    headers: { authorization: `Bearer ${sessionToken}` },
+    headers: { authorization: 'Bearer not-a-token' },
   });
-  assert.equal(me.statusCode, 200);
-  assert.equal(me.json().user.email, emailA);
+  assert.equal(garbage.statusCode, 401);
 
-  const createSource = await app.inject({
-    method: 'POST',
-    url: '/api/sources',
-    headers: { authorization: `Bearer ${sessionToken}` },
-    payload: { kind: 'local', label: `alice source ${suffix}`, root_path: '/tmp/alice' },
-  });
-  assert.equal(createSource.statusCode, 201);
-
-  const registerB = await app.inject({
-    method: 'POST',
-    url: '/api/auth/register',
-    payload: { email: emailB, password: 'bob-pw-123456' },
-  });
-  const tokenB = registerB.json().token;
-
-  const listA = await app.inject({
-    method: 'GET',
-    url: '/api/sources',
-    headers: { authorization: `Bearer ${tokenA}` },
-  });
-  const listB = await app.inject({
-    method: 'GET',
-    url: '/api/sources',
-    headers: { authorization: `Bearer ${tokenB}` },
-  });
-  assert.ok(listA.json().sources.length >= 1);
-  assert.equal(listB.json().sources.length, 0);
-
-  const logout = await app.inject({
-    method: 'POST',
-    url: '/api/auth/logout',
-    headers: { authorization: `Bearer ${sessionToken}` },
-  });
-  assert.equal(logout.statusCode, 200);
-
-  const meAfterLogout = await app.inject({
+  const userId = crypto.randomUUID();
+  const serviceToken = await tokenFor(userId, 'service@example.com', { audience: 'service_role' });
+  const wrongAudience = await app.inject({
     method: 'GET',
     url: '/api/auth/me',
-    headers: { authorization: `Bearer ${sessionToken}` },
+    headers: { authorization: `Bearer ${serviceToken}` },
   });
-  assert.equal(meAfterLogout.statusCode, 401);
+  assert.equal(wrongAudience.statusCode, 401);
+
+  const wrongIssuer = await tokenFor(userId, 'issuer@example.com', {
+    issuer: 'https://someone-else.supabase.co/auth/v1',
+  });
+  const badIssuer = await app.inject({
+    method: 'GET',
+    url: '/api/auth/me',
+    headers: { authorization: `Bearer ${wrongIssuer}` },
+  });
+  assert.equal(badIssuer.statusCode, 401);
+
+  const expired = await tokenFor(userId, 'expired@example.com', { expiresIn: '-1h' });
+  const expiredResponse = await app.inject({
+    method: 'GET',
+    url: '/api/auth/me',
+    headers: { authorization: `Bearer ${expired}` },
+  });
+  assert.equal(expiredResponse.statusCode, 401);
 });
 
-test('MFA setup, login challenge, TOTP and recovery code verification', { skip }, async (t) => {
-  const suffix = crypto.randomBytes(4).toString('hex');
-  const email = `mfa_${suffix}@example.com`;
-  const password = 'mfa-password-1234';
-  const pool = new pg.Pool({ connectionString: databaseUrl });
+test('me creates the profile from token metadata', { skip }, async (t) => {
+  const email = uniqueEmail('me');
+  const userId = await createAuthUser(email);
+  const app = await buildApp();
   t.after(async () => {
-    await pool.query('DELETE FROM users WHERE lower(email) = lower($1)', [email]);
-    await pool.end();
+    await app.close();
+    await cleanupUser(userId);
   });
-  const app = Fastify();
-  registerAuthHook(app);
-  await app.register(authRoutes);
-  t.after(async () => app.close());
 
-  const register = await app.inject({
-    method: 'POST',
-    url: '/api/auth/register',
-    payload: { email, password },
+  const token = await tokenFor(userId, email, {
+    userMetadata: { display_name: 'Alice' },
   });
-  assert.equal(register.statusCode, 201, register.body);
-  const token = register.json().token;
-
-  const setup = await app.inject({
-    method: 'POST',
-    url: '/api/auth/mfa/setup',
+  const response = await app.inject({
+    method: 'GET',
+    url: '/api/auth/me',
     headers: { authorization: `Bearer ${token}` },
   });
-  assert.equal(setup.statusCode, 200, setup.body);
-  const { secret, otpauth_uri: uri } = setup.json();
-  assert.match(secret, /^[A-Z2-7]+$/);
-  assert.match(uri, /^otpauth:\/\/totp\//);
+  assert.equal(response.statusCode, 200, response.body);
+  const user = response.json().user;
+  assert.equal(user.id, userId);
+  assert.equal(user.email, email);
+  assert.equal(user.display_name, 'Alice');
+  assert.equal(user.mfa_enabled, false);
+});
 
-  const badEnable = await app.inject({
-    method: 'POST',
-    url: '/api/auth/mfa/enable',
-    headers: { authorization: `Bearer ${token}` },
-    payload: { code: '000000' },
+test('mfa enforcement requires aal2 when the profile has MFA enabled', { skip }, async (t) => {
+  const email = uniqueEmail('aal');
+  const userId = await createAuthUser(email);
+  fakeGoTrue.state.users.set(userId, {
+    id: userId,
+    email,
+    factors: [{ id: 'factor-1', factor_type: 'totp', status: 'verified' }],
   });
-  assert.equal(badEnable.statusCode, 401);
-
-  const enable = await app.inject({
-    method: 'POST',
-    url: '/api/auth/mfa/enable',
-    headers: { authorization: `Bearer ${token}` },
-    payload: { code: generateTotp(secret) },
+  await pool.query(
+    `INSERT INTO profiles (id, email, mfa_enabled) VALUES ($1, $2, true)
+     ON CONFLICT (id) DO UPDATE SET mfa_enabled = true`,
+    [userId, email],
+  );
+  const app = await buildApp();
+  t.after(async () => {
+    await app.close();
+    await cleanupUser(userId);
   });
-  assert.equal(enable.statusCode, 200, enable.body);
-  assert.equal(enable.json().user.mfa_enabled, true);
-  const mfaCodes = enable.json().recovery_codes;
-  assert.equal(mfaCodes.length, 8);
 
-  const login = await app.inject({
-    method: 'POST',
-    url: '/api/auth/login',
-    payload: { identifier: email, password },
-  });
-  assert.equal(login.statusCode, 200);
-  assert.equal(login.json().mfa_required, true);
-  const pendingToken = login.json().token;
-
+  const aal1 = await tokenFor(userId, email, { aal: 'aal1' });
   const blocked = await app.inject({
     method: 'GET',
-    url: '/api/sources',
-    headers: { authorization: `Bearer ${pendingToken}` },
+    url: '/api/auth/me',
+    headers: { authorization: `Bearer ${aal1}` },
   });
   assert.equal(blocked.statusCode, 403);
   assert.equal(blocked.json().error, 'mfa_required');
 
-  const wrongCode = await app.inject({
-    method: 'POST',
-    url: '/api/auth/mfa/verify',
-    headers: { authorization: `Bearer ${pendingToken}` },
-    payload: { code: '123456' },
-  });
-  assert.equal(wrongCode.statusCode, 401);
-
-  const verify = await app.inject({
-    method: 'POST',
-    url: '/api/auth/mfa/verify',
-    headers: { authorization: `Bearer ${pendingToken}` },
-    payload: { code: generateTotp(secret) },
-  });
-  assert.equal(verify.statusCode, 200);
-
-  const meAfterVerify = await app.inject({
+  const aal2 = await tokenFor(userId, email, { aal: 'aal2' });
+  const allowed = await app.inject({
     method: 'GET',
     url: '/api/auth/me',
-    headers: { authorization: `Bearer ${pendingToken}` },
+    headers: { authorization: `Bearer ${aal2}` },
   });
-  assert.equal(meAfterVerify.statusCode, 200);
-
-  const loginAgain = await app.inject({
-    method: 'POST',
-    url: '/api/auth/login',
-    payload: { identifier: email, password },
-  });
-  const recoveryToken = loginAgain.json().token;
-  const recoveryVerify = await app.inject({
-    method: 'POST',
-    url: '/api/auth/mfa/verify',
-    headers: { authorization: `Bearer ${recoveryToken}` },
-    payload: { code: mfaCodes[0] },
-  });
-  assert.equal(recoveryVerify.statusCode, 200);
-
-  const reuseCode = await app.inject({
-    method: 'POST',
-    url: '/api/auth/login',
-    payload: { identifier: email, password },
-  });
-  const reuseVerify = await app.inject({
-    method: 'POST',
-    url: '/api/auth/mfa/verify',
-    headers: { authorization: `Bearer ${reuseCode.json().token}` },
-    payload: { code: mfaCodes[0] },
-  });
-  assert.equal(reuseVerify.statusCode, 401);
-
-  const disableWithoutPassword = await app.inject({
-    method: 'POST',
-    url: '/api/auth/mfa/disable',
-    headers: { authorization: `Bearer ${recoveryToken}` },
-    payload: { password: 'wrong-password-1' },
-  });
-  assert.equal(disableWithoutPassword.statusCode, 403);
-
-  const disable = await app.inject({
-    method: 'POST',
-    url: '/api/auth/mfa/disable',
-    headers: { authorization: `Bearer ${recoveryToken}` },
-    payload: { password },
-  });
-  assert.equal(disable.statusCode, 200);
+  assert.equal(allowed.statusCode, 200, allowed.body);
 });
 
-test('password reset with a recovery code revokes sessions and consumes the code', { skip }, async (t) => {
-  const suffix = crypto.randomBytes(4).toString('hex');
-  const email = `reset_${suffix}@example.com`;
-  const pool = new pg.Pool({ connectionString: databaseUrl });
+test('mfa sync mirrors verified Supabase factors into the profile', { skip }, async (t) => {
+  const email = uniqueEmail('sync');
+  const userId = await createAuthUser(email);
+  fakeGoTrue.state.users.set(userId, {
+    id: userId,
+    email,
+    factors: [{ id: 'factor-9', factor_type: 'totp', status: 'verified' }],
+  });
+  const app = await buildApp();
   t.after(async () => {
-    await pool.query('DELETE FROM users WHERE lower(email) = lower($1)', [email]);
-    await pool.end();
+    await app.close();
+    await cleanupUser(userId);
   });
-  const app = Fastify();
-  registerAuthHook(app);
-  await app.register(authRoutes);
-  t.after(async () => app.close());
 
-  const register = await app.inject({
+  const token = await tokenFor(userId, email, { aal: 'aal2' });
+  const response = await app.inject({
     method: 'POST',
-    url: '/api/auth/register',
-    payload: { email, password: 'reset-password-1' },
+    url: '/api/auth/mfa/sync',
+    headers: { authorization: `Bearer ${token}` },
   });
-  assert.equal(register.statusCode, 201);
-  const token = register.json().token;
-  const code = register.json().recovery_codes.password[0];
+  assert.equal(response.statusCode, 200, response.body);
+  assert.equal(response.json().user.mfa_enabled, true);
 
-  const badCode = await app.inject({
+  const { rows } = await pool.query('SELECT mfa_enabled FROM profiles WHERE id = $1', [userId]);
+  assert.equal(rows[0].mfa_enabled, true);
+});
+
+test('recovery codes regenerate and reset the Supabase password once', { skip }, async (t) => {
+  const email = uniqueEmail('reset');
+  const userId = await createAuthUser(email);
+  fakeGoTrue.state.users.set(userId, { id: userId, email, factors: [] });
+  const app = await buildApp();
+  t.after(async () => {
+    await app.close();
+    await cleanupUser(userId);
+  });
+
+  const token = await tokenFor(userId, email);
+  const codesResponse = await app.inject({
+    method: 'POST',
+    url: '/api/auth/recovery-codes',
+    headers: { authorization: `Bearer ${token}` },
+  });
+  assert.equal(codesResponse.statusCode, 200, codesResponse.body);
+  const codes = codesResponse.json().recovery_codes;
+  assert.equal(codes.length, 8);
+
+  const weak = await app.inject({
     method: 'POST',
     url: '/api/auth/password/reset-with-code',
-    payload: { identifier: email, recovery_code: 'WRNG-WRNG', new_password: 'brand-new-pass-1' },
+    payload: { identifier: email, recovery_code: codes[0], new_password: 'short' },
   });
-  assert.equal(badCode.statusCode, 400);
+  assert.equal(weak.statusCode, 400);
 
   const reset = await app.inject({
     method: 'POST',
     url: '/api/auth/password/reset-with-code',
-    payload: { identifier: email, recovery_code: code, new_password: 'brand-new-pass-1' },
+    payload: {
+      identifier: email,
+      recovery_code: codes[0],
+      new_password: 'brand-new-password-1',
+    },
   });
-  assert.equal(reset.statusCode, 200);
-
-  const meAfterReset = await app.inject({
-    method: 'GET',
-    url: '/api/auth/me',
-    headers: { authorization: `Bearer ${token}` },
-  });
-  assert.equal(meAfterReset.statusCode, 401);
+  assert.equal(reset.statusCode, 200, reset.body);
+  const update = fakeGoTrue.state.updates.at(-1);
+  assert.deepEqual(update, { id: userId, patch: { password: 'brand-new-password-1' } });
+  assert.equal(fakeGoTrue.state.signOuts.includes(userId), true);
 
   const reuse = await app.inject({
     method: 'POST',
     url: '/api/auth/password/reset-with-code',
-    payload: { identifier: email, recovery_code: code, new_password: 'another-new-pass-1' },
+    payload: {
+      identifier: email,
+      recovery_code: codes[0],
+      new_password: 'another-password-1',
+    },
   });
   assert.equal(reuse.statusCode, 400);
 
-  const login = await app.inject({
+  const badCode = await app.inject({
     method: 'POST',
-    url: '/api/auth/login',
-    payload: { identifier: email, password: 'brand-new-pass-1' },
+    url: '/api/auth/password/reset-with-code',
+    payload: { identifier: email, recovery_code: 'WRNG-WRNG', new_password: 'another-password-1' },
   });
-  assert.equal(login.statusCode, 200);
+  assert.equal(badCode.statusCode, 400);
+
+  const unknown = await app.inject({
+    method: 'POST',
+    url: '/api/auth/password/reset-with-code',
+    payload: {
+      identifier: 'nobody@example.com',
+      recovery_code: codes[1],
+      new_password: 'another-password-1',
+    },
+  });
+  assert.equal(unknown.statusCode, 400);
 });
 
-test('sessions are listed and can be revoked', { skip }, async (t) => {
-  const suffix = crypto.randomBytes(4).toString('hex');
-  const email = `sessions_${suffix}@example.com`;
-  const pool = new pg.Pool({ connectionString: databaseUrl });
+test('mfa recovery removes verified factors and consumes the code', { skip }, async (t) => {
+  const email = uniqueEmail('mfarec');
+  const userId = await createAuthUser(email);
+  fakeGoTrue.state.users.set(userId, {
+    id: userId,
+    email,
+    factors: [
+      { id: 'factor-a', factor_type: 'totp', status: 'verified' },
+      { id: 'factor-b', factor_type: 'totp', status: 'unverified' },
+    ],
+  });
+  await pool.query(
+    `INSERT INTO profiles (id, email, mfa_enabled) VALUES ($1, $2, true)
+     ON CONFLICT (id) DO UPDATE SET mfa_enabled = true`,
+    [userId, email],
+  );
+  const code = 'ABCD-EF23';
+  await pool.query(
+    'INSERT INTO mfa_recovery_codes (user_id, code_hash) VALUES ($1, $2)',
+    [userId, hashRecoveryCode(code)],
+  );
+  const app = await buildApp();
   t.after(async () => {
-    await pool.query('DELETE FROM users WHERE lower(email) = lower($1)', [email]);
-    await pool.end();
+    await app.close();
+    await cleanupUser(userId);
   });
-  const app = Fastify();
-  registerAuthHook(app);
-  await app.register(authRoutes);
-  t.after(async () => app.close());
 
-  const register = await app.inject({
+  const wrong = await app.inject({
     method: 'POST',
-    url: '/api/auth/register',
-    payload: { email, password: 'sessions-pass-1' },
+    url: '/api/auth/mfa/recovery',
+    payload: { identifier: email, recovery_code: 'ZZZZ-ZZZZ' },
   });
-  const firstToken = register.json().token;
-  const second = await app.inject({
+  assert.equal(wrong.statusCode, 400);
+
+  const response = await app.inject({
     method: 'POST',
-    url: '/api/auth/login',
-    payload: { identifier: email, password: 'sessions-pass-1' },
+    url: '/api/auth/mfa/recovery',
+    payload: { identifier: email, recovery_code: code },
   });
-  const secondToken = second.json().token;
+  assert.equal(response.statusCode, 200, response.body);
+  assert.deepEqual(fakeGoTrue.state.deletedFactors, [
+    { userId, factorId: 'factor-a' },
+  ]);
+  const { rows } = await pool.query('SELECT mfa_enabled FROM profiles WHERE id = $1', [userId]);
+  assert.equal(rows[0].mfa_enabled, false);
 
-  const list = await app.inject({
-    method: 'GET',
-    url: '/api/auth/sessions',
-    headers: { authorization: `Bearer ${secondToken}` },
-  });
-  assert.equal(list.statusCode, 200);
-  assert.equal(list.json().sessions.length, 2);
-  assert.equal(list.json().sessions.filter((session) => session.current).length, 1);
-
-  const other = list.json().sessions.find((session) => !session.current);
-  const revoke = await app.inject({
-    method: 'DELETE',
-    url: `/api/auth/sessions/${other.id}`,
-    headers: { authorization: `Bearer ${secondToken}` },
-  });
-  assert.equal(revoke.statusCode, 200);
-
-  const revokedUse = await app.inject({
-    method: 'GET',
-    url: '/api/auth/me',
-    headers: { authorization: `Bearer ${firstToken}` },
-  });
-  assert.equal(revokedUse.statusCode, 401);
-
-  const revokeAll = await app.inject({
-    method: 'DELETE',
-    url: '/api/auth/sessions',
-    headers: { authorization: `Bearer ${secondToken}` },
-  });
-  assert.equal(revokeAll.statusCode, 200);
-});
-
-test('login locks the account after repeated failures', { skip }, async (t) => {
-  const suffix = crypto.randomBytes(4).toString('hex');
-  const email = `lock_${suffix}@example.com`;
-  const pool = new pg.Pool({ connectionString: databaseUrl });
-  t.after(async () => {
-    await pool.query('DELETE FROM users WHERE lower(email) = lower($1)', [email]);
-    await pool.end();
-  });
-  const app = Fastify();
-  registerAuthHook(app);
-  await app.register(authRoutes);
-  t.after(async () => app.close());
-
-  await app.inject({
+  const reuse = await app.inject({
     method: 'POST',
-    url: '/api/auth/register',
-    payload: { email, password: 'lock-password-1' },
+    url: '/api/auth/mfa/recovery',
+    payload: { identifier: email, recovery_code: code },
   });
-
-  for (let attempt = 0; attempt < 10; attempt += 1) {
-    const response = await app.inject({
-      method: 'POST',
-      url: '/api/auth/login',
-      payload: { identifier: email, password: 'wrong-password-1' },
-    });
-    assert.equal(response.statusCode, 401);
-  }
-  const locked = await app.inject({
-    method: 'POST',
-    url: '/api/auth/login',
-    payload: { identifier: email, password: 'lock-password-1' },
-  });
-  assert.equal(locked.statusCode, 429);
-  assert.equal(locked.json().error, 'too_many_attempts');
+  assert.equal(reuse.statusCode, 400);
 });

@@ -1,0 +1,25 @@
+name: Netlify page
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'netlify/**'
+      - 'scripts/build-netlify-page.sh'
+      - '.github/workflows/netlify-page.yml'
+  workflow_dispatch:
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build the static page zip
+        run: bash scripts/build-netlify-page.sh
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: photo-atlas-confirm-email
+          path: dist/photo-atlas-confirm-email.zip
+          if-no-files-found: error

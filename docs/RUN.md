@@ -3,13 +3,17 @@
 ## One command
 
 ```bash
-bash scripts/dev-up.sh    # database check + API + app web preview, prints the URLs
+bash scripts/dev-up.sh    # API + app web preview, prints the URLs (uses the .env database)
 bash scripts/dev-down.sh  # stops what dev-up started
 ```
 
 `dev-up.sh` reuses anything already listening on the API (8787) or web (8080) port, so it is safe
 to run next to a manually started `npm run dev`. It starts the app web preview through
 `photo-atlas-app/scripts/serve-web.sh` (override the repo location with `PHOTO_ATLAS_APP_DIR`).
+
+The production database is **Supabase cloud** (`DATABASE_URL` points at the Session Pooler). The
+script only starts a local PostgreSQL when `DATABASE_URL` is local (plain PostgreSQL development);
+with the Supabase URL it leaves the local service alone.
 
 ## URLs
 
@@ -38,51 +42,40 @@ automatically, so opening the printed `Web (phone)` URL is enough.
 ## Day-to-day
 
 ```bash
-bash scripts/db-local.sh start   # start database and ensure .env
-npm run migrate                  # apply new SQL migrations
-npm run seed                     # demo data (safe to re-run)
+npm run migrate                  # apply new SQL migrations to DATABASE_URL
+npm run seed -- <email>          # optional demo sources/media assigned to an existing account
 npm run dev                      # API with --watch on http://localhost:8787
 ```
 
-Check the API:
+Check the API (the token comes from the app or from a Supabase Auth session):
 
 ```bash
-TOKEN=$(curl -s -X POST http://localhost:8787/api/auth/login \
-  -H 'Content-Type: application/json' \
-  -d '{"username":"demo","password":"demo"}' | python3 -c 'import json,sys; print(json.load(sys.stdin)["token"])')
-
 curl http://localhost:8787/health
-curl -H "Authorization: Bearer $TOKEN" 'http://localhost:8787/api/clusters?west=-180&south=-90&east=180&north=90&zoom=0'
-curl -H "Authorization: Bearer $TOKEN" 'http://localhost:8787/api/timeline'
+curl http://localhost:8787/api/config
+curl -H "Authorization: Bearer <supabase-access-token>" \
+  'http://localhost:8787/api/media?limit=5'
 ```
 
-The seed creates a development account: **demo / demo** (override the password with
-`DEMO_PASSWORD` in `.env` before running `npm run seed`). All `/api/*` routes except register/login
-require the bearer token; the app logs in on first start.
+Every `/api/*` route except `/api/config`, `/api/auth/password/reset-with-code` and
+`/api/auth/mfa/recovery` requires a **Supabase access token** (`Authorization: Bearer <jwt>`); the
+API verifies the signature locally against `SUPABASE_JWKS_URL`. Accounts, passwords, email
+confirmation and TOTP factors are managed by Supabase Auth (dashboard → Authentication → Users).
 
-## Users
+## Users and recovery
 
-```bash
-# change your own password from the app (Settings -> Account) or with a token
-curl -X POST http://localhost:8787/api/auth/change-password \
-  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
-  -d '{"current_password":"demo","new_password":"newpass"}'
-
-# forgotten password (server-side, no email in this dev phase)
-npm run reset-password -- demo
-npm run reset-password -- demo my-new-password
-```
+- Users register in the app with email + password; Supabase sends the confirmation email and the
+  link lands on the Netlify page (see [SUPABASE_CLOUD.md](SUPABASE_CLOUD.md)).
+- The app shows one-time **recovery codes** used to reset the password without email; each code works
+  once and the API signs out every session after a reset.
+- Break-glass from the server: `npm run reset-password -- <email> [new_password]` (needs the
+  service key in `.env`; prints the new password and signs the user out where supported).
+- Losing a 2FA device: an MFA recovery code removes the TOTP factors
+  (`POST /api/auth/mfa/recovery`); an admin can also delete the factor from the Supabase dashboard.
 
 ## Previews cache
 
 kDrive previews are cached under `MEDIA_CACHE_DIR` (default `~/.cache/photo-atlas`). Progress of the
 automatic delta job after each scan: `GET /api/kdrive/previews`.
-
-Stop the database:
-
-```bash
-bash scripts/db-local.sh stop    # stops the Docker/Supabase containers (not system PostgreSQL)
-```
 
 ## Environment variables
 
@@ -91,10 +84,17 @@ bash scripts/db-local.sh stop    # stops the Docker/Supabase containers (not sys
 | `PORT` | `8787` | HTTP port |
 | `HOST` | `0.0.0.0` | Bind address; use `127.0.0.1` to keep it local |
 | `CORS_ORIGIN` | `*` | Allowed origin(s), comma separated |
-| `DATABASE_URL` | system URL | PostgreSQL connection string |
+| `DATABASE_URL` | local PostgreSQL | PostgreSQL connection string (Supabase Session Pooler in production, `?sslmode=require`) |
+| `SUPABASE_URL` | empty | Project URL, e.g. `https://<ref>.supabase.co` |
+| `SUPABASE_PUBLISHABLE_KEY` | empty | Public key exposed to the app by `GET /api/config` |
+| `SUPABASE_SECRET_KEY` | empty | Server-only key for the Auth admin API (password reset, factors) |
+| `SUPABASE_JWKS_URL` | empty | JWKS endpoint used to verify access tokens |
+| `EMAIL_CONFIRM_REDIRECT_URL` | empty | Netlify page returned to the app for the signup email |
 | `KDRIVE_ENC_KEY` | empty | 64 hex chars; required to connect kDrive |
 | `LOCAL_MEDIA_ROOTS` | empty | Colon separated allowlist for local thumbnails |
 | `KDRIVE_API_BASE` | `https://api.infomaniak.com` | Override for tests |
+| `MEDIA_URL_SECRET` | `KDRIVE_ENC_KEY` | HMAC secret for signed thumbnail/download URLs |
+| `MEDIA_CACHE_DIR` | `~/.cache/photo-atlas` | Thumbnail cache directory |
 
 ## Tests
 
@@ -102,16 +102,22 @@ bash scripts/db-local.sh stop    # stops the Docker/Supabase containers (not sys
 npm test
 ```
 
-`test/crypto.test.js` runs anywhere. `test/db.test.js` requires a reachable database and is skipped
-when `DATABASE_URL` is not set.
+Unit tests run anywhere. Database integration tests use `TEST_DATABASE_URL` (a throwaway database)
+and are skipped when it is not set — never point it at the production Supabase database.
+
+```bash
+TEST_DATABASE_URL=postgresql://photo_atlas:photo_atlas@127.0.0.1:5432/photo_atlas npm test
+```
 
 ## Troubleshooting
 
 | Symptom | Cause / fix |
 |---|---|
-| `ECONNREFUSED 127.0.0.1:5432` | PostgreSQL is not running: `sudo systemctl start postgresql` |
-| `permission denied for schema public` | The DB role is not the database owner; re-run `bash scripts/db-local.sh start` |
-| `extension "postgis" is not available` | Install `postgresql-17-postgis-3` |
+| `ECONNREFUSED ...:5432` on a local database | PostgreSQL is not running: `sudo systemctl start postgresql`, or use the Supabase URL |
+| `missing_supabase_configuration` / 500 on `/api/config` | `SUPABASE_URL` and `SUPABASE_PUBLISHABLE_KEY` are not set in `.env` |
+| `401 unauthorized` on every request | Token expired or project keys changed; sign in again from the app |
+| `403 mfa_required` | The account has TOTP enabled and the session is only AAL1; complete the MFA challenge |
+| `extension "postgis" is not available` | Enable PostGIS (and `pg_trgm`) in the Supabase dashboard or locally with `sudo apt install postgresql-17-postgis-3` |
 | Migration says `failed` | The transaction was rolled back; fix the SQL and re-run `npm run migrate` |
 | `KDRIVE_ENC_KEY must be...` | Put a 32-byte hex key in `.env` (`openssl rand -hex 32`) |
 | Port 8787 in use | Set `PORT=8788` in `.env` |

@@ -3,7 +3,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import 'dotenv/config';
 import pg from 'pg';
-import { hashPassword } from '../src/lib/passwords.js';
+import * as gotrue from '../src/lib/gotrue.js';
 
 const seedFile = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'supabase', 'seed.sql');
 
@@ -12,33 +12,30 @@ async function main() {
   const sql = await readFile(seedFile, 'utf8');
   await pool.query(sql);
 
-  const demoPassword = process.env.DEMO_PASSWORD ?? 'demo';
-  const existing = await pool.query('SELECT id FROM users WHERE lower(username) = lower($1)', ['demo']);
-  let userId;
-  if (existing.rows.length > 0) {
-    userId = existing.rows[0].id;
-    await pool.query('UPDATE users SET password_hash = $2 WHERE id = $1', [
-      userId,
-      hashPassword(demoPassword),
-    ]);
-  } else {
-    const inserted = await pool.query(
-      'INSERT INTO users (username, password_hash) VALUES ($1, $2) RETURNING id',
-      ['demo', hashPassword(demoPassword)],
-    );
-    userId = inserted.rows[0].id;
+  const email = String(process.argv[2] ?? process.env.DEMO_EMAIL ?? '').trim();
+  if (!email) {
+    console.log('seed applied (sources and media items, no owner)');
+    console.log('assign them to a Supabase Auth user with: npm run seed -- <email>');
+    await pool.end();
+    return;
   }
 
-  const sources = await pool.query('UPDATE sources SET owner_id = $1 WHERE owner_id IS NULL RETURNING id', [userId]);
+  const user = await gotrue.adminFindUserByEmail(email);
+  if (!user) {
+    console.error(`seed applied, but no Supabase Auth user found for ${email}`);
+    await pool.end();
+    process.exit(1);
+  }
+  const sources = await pool.query('UPDATE sources SET owner_id = $1 WHERE owner_id IS NULL RETURNING id', [
+    user.id,
+  ]);
   const accounts = await pool.query(
     'UPDATE kdrive_accounts SET owner_id = $1 WHERE owner_id IS NULL RETURNING id',
-    [userId],
+    [user.id],
   );
-
   const counts = await pool.query('SELECT count(*)::int AS items FROM media_items');
   console.log(`seed applied, media_items = ${counts.rows[0].items}`);
-  console.log(`demo user ready: demo / ${demoPassword}`);
-  console.log(`assigned ${sources.rowCount} sources and ${accounts.rowCount} kDrive accounts to demo`);
+  console.log(`assigned ${sources.rowCount} sources and ${accounts.rowCount} kDrive accounts to ${email}`);
   await pool.end();
 }
 

@@ -1,28 +1,37 @@
-CREATE TABLE IF NOT EXISTS users (
-  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  username text NOT NULL,
-  password_hash text NOT NULL,
-  created_at timestamptz NOT NULL DEFAULT now()
-);
+-- Supabase Auth compatibility.
+--
+-- On Supabase the `auth` schema and `auth.users` already exist; this migration only creates a
+-- minimal stub when the database is plain PostgreSQL (local development and CI), so foreign keys
+-- and tests work without the full Supabase stack. The stub is never touched on Supabase because
+-- the table exists there (checked through pg_class, which every role can read).
 
-CREATE UNIQUE INDEX IF NOT EXISTS users_username_lower_uniq ON users (lower(username));
+CREATE SCHEMA IF NOT EXISTS auth;
 
-CREATE TABLE IF NOT EXISTS sessions (
-  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  user_id uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-  token_hash text NOT NULL UNIQUE,
-  created_at timestamptz NOT NULL DEFAULT now(),
-  expires_at timestamptz NOT NULL,
-  last_used_at timestamptz
-);
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1
+    FROM pg_class c
+    JOIN pg_namespace n ON n.oid = c.relnamespace
+    WHERE n.nspname = 'auth' AND c.relname = 'users' AND c.relkind = 'r'
+  ) THEN
+    CREATE TABLE auth.users (
+      id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+      email text,
+      email_confirmed_at timestamptz,
+      raw_user_meta_data jsonb NOT NULL DEFAULT '{}'::jsonb,
+      created_at timestamptz NOT NULL DEFAULT now()
+    );
+    CREATE UNIQUE INDEX auth_users_email_lower_uniq
+      ON auth.users (lower(email))
+      WHERE email IS NOT NULL;
+  END IF;
+END $$;
 
-CREATE INDEX IF NOT EXISTS sessions_user_idx ON sessions (user_id);
-CREATE INDEX IF NOT EXISTS sessions_expires_idx ON sessions (expires_at);
-
-ALTER TABLE sources ADD COLUMN IF NOT EXISTS owner_id uuid REFERENCES users(id) ON DELETE CASCADE;
+ALTER TABLE sources ADD COLUMN IF NOT EXISTS owner_id uuid REFERENCES auth.users(id) ON DELETE CASCADE;
 CREATE INDEX IF NOT EXISTS sources_owner_idx ON sources (owner_id);
 
-ALTER TABLE kdrive_accounts ADD COLUMN IF NOT EXISTS owner_id uuid REFERENCES users(id) ON DELETE CASCADE;
+ALTER TABLE kdrive_accounts ADD COLUMN IF NOT EXISTS owner_id uuid REFERENCES auth.users(id) ON DELETE CASCADE;
 CREATE UNIQUE INDEX IF NOT EXISTS kdrive_accounts_owner_uniq ON kdrive_accounts (owner_id);
 
 DROP INDEX IF EXISTS sources_kdrive_folder_uniq;

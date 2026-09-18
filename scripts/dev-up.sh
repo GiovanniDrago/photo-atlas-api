@@ -18,10 +18,18 @@ if [ ! -f "$ROOT_DIR/.env" ]; then
   bash "$ROOT_DIR/scripts/db-local.sh" start
 fi
 
-if ! pg_isready -q -h 127.0.0.1 -p 5432 2>/dev/null; then
-  echo "[dev-up] PostgreSQL is not ready, starting it"
-  bash "$ROOT_DIR/scripts/db-local.sh" start
-fi
+db_host="$(printf '%s' "${DATABASE_URL:-}" | sed -E 's#^[a-z+]+://([^@/]*@)?([^:/?]+).*#\2#')"
+case "$db_host" in
+  ''|localhost|127.0.0.1|::1)
+    if ! pg_isready -q -h 127.0.0.1 -p 5432 2>/dev/null; then
+      echo "[dev-up] PostgreSQL is not ready, starting it"
+      bash "$ROOT_DIR/scripts/db-local.sh" start
+    fi
+    ;;
+  *)
+    echo "[dev-up] using remote database (${db_host}), local PostgreSQL left untouched"
+    ;;
+esac
 
 if ss -ltn 2>/dev/null | grep -q ":${API_PORT} "; then
   echo "[dev-up] API already listening on ${API_PORT}"

@@ -22,96 +22,81 @@ readable local files always carry a `download_url`.
 
 ## Authentication
 
-Every `/api/*` route except `register`, `login` and `password/reset-with-code` requires a session
-token:
+Accounts and credentials live in **Supabase Auth**; the API only verifies the access token. Get one
+by signing in from the app (or any Supabase client with the publishable key) and send it as:
 
 ```
-Authorization: Bearer <token>
+Authorization: Bearer <supabase access token>
 ```
 
-Sessions last 30 days, are stored hashed server-side and are revoked by `POST /api/auth/logout`,
-by a password change, by a password reset or from the session list.
+The API verifies the JWT signature locally against `SUPABASE_JWKS_URL` (`jose`, cached JWKS),
+checks issuer + audience (`authenticated`) and uses the `sub` claim as `owner_id` for every row.
+Tokens are short-lived; the client refreshes them automatically. The public routes are
+`GET /api/config`, `POST /api/auth/password/reset-with-code` and `POST /api/auth/mfa/recovery`.
 
-### Registration and login
+### Client configuration
 
 ```bash
-# register with email + password (username defaults to the email local part, display_name optional)
-curl -X POST http://localhost:8787/api/auth/register \
-  -H 'Content-Type: application/json' \
-  -d '{"email":"alice@example.com","password":"correct-horse-battery","display_name":"Alice"}'
-
-# the response also contains one-time recovery codes:
-#   { "user": {...}, "token": "...", "expires_at": "...",
-#     "recovery_codes": { "password": ["XXXX-XXXX", ...8], "mfa": ["XXXX-XXXX", ...8] } }
-
-# login with the email or the username
-curl -X POST http://localhost:8787/api/auth/login \
-  -H 'Content-Type: application/json' \
-  -d '{"identifier":"alice@example.com","password":"correct-horse-battery"}'
+curl http://localhost:8787/api/config
+# { "supabase_url": "https://<ref>.supabase.co",
+#   "supabase_publishable_key": "sb_publishable_…",
+#   "email_confirm_redirect_url": "https://<netlify>/?app=PhotoAtlas" }
 ```
 
-Passwords are hashed with scrypt and must be 10-200 characters, must not contain the email local
-part and are rejected if they appear in a small common-password list. Ten failed logins lock the
-account for 15 minutes; `/api/auth/*` is rate limited per IP.
+The app uses these public values to initialize `supabase_flutter`.
 
-When MFA is enabled, `login` returns `"mfa_required": true` and a short-lived (10 minutes) session
-that can only call `POST /api/auth/mfa/verify` and `POST /api/auth/logout`. Any other route returns
-`403 { "error": "mfa_required" }`.
+### Two-factor authentication
 
-### Two-factor authentication (TOTP)
+TOTP factors are Supabase Auth factors: enroll, challenge and verify with the Supabase client
+(`auth.mfa.*`). The API enforces the result: when the account has a verified factor and the token is
+only `aal1`, every route answers `403 { "error": "mfa_required" }`. After enrolling or removing a
+factor the app calls:
 
 ```bash
-curl -X POST http://localhost:8787/api/auth/mfa/setup -H "Authorization: Bearer <token>"
-# -> { "secret": "BASE32...", "otpauth_uri": "otpauth://totp/..." }
-
-curl -X POST http://localhost:8787/api/auth/mfa/enable \
-  -H "Authorization: Bearer <token>" -H 'Content-Type: application/json' \
-  -d '{"code":"123456"}'
-# -> { "ok": true, "user": {...}, "recovery_codes": ["XXXX-XXXX", ...8] }
-
-curl -X POST http://localhost:8787/api/auth/mfa/verify \
-  -H "Authorization: Bearer <pending token>" -H 'Content-Type: application/json' \
-  -d '{"code":"123456"}'          # or one MFA recovery code
-
-curl -X POST http://localhost:8787/api/auth/mfa/disable \
-  -H "Authorization: Bearer <token>" -H 'Content-Type: application/json' \
-  -d '{"password":"..."}'
+curl -X POST http://localhost:8787/api/auth/mfa/sync -H "Authorization: Bearer <token>"
+# { "user": { ..., "mfa_enabled": true } }
 ```
 
-Codes follow RFC 6238 (SHA-1, 6 digits, 30 s, ±1 step). Recovery codes are single use; regenerate
-them with `POST /api/auth/mfa/recovery-codes` (requires the password).
+`GET /api/auth/me` returns the mirrored profile (`id`, `email`, `display_name`, `mfa_enabled`) and
+refreshes `mfa_enabled` from the Auth admin API.
 
-### Password reset with a recovery code
+### Recovery codes (no email needed)
 
-There is no email flow. Each account gets 8 single-use password recovery codes
-(`POST /api/auth/recovery-codes` regenerates them, requires the password):
+Each account gets 8 one-time password-reset codes and 8 one-time MFA-recovery codes. The app shows
+them after signup/regeneration; the API stores only scrypt hashes.
 
 ```bash
+# regenerate the password codes (authenticated; the app re-authenticates first)
+curl -X POST http://localhost:8787/api/auth/recovery-codes -H "Authorization: Bearer <token>"
+# { "recovery_codes": ["XXXX-XXXX", ...8] }
+
+# forgotten password: email + code + new password (public)
 curl -X POST http://localhost:8787/api/auth/password/reset-with-code \
   -H 'Content-Type: application/json' \
-  -d '{"identifier":"alice@example.com","recovery_code":"XXXX-XXXX","new_password":"brand-new-pass"}'
+  -d '{"identifier":"alice@example.com","recovery_code":"XXXX-XXXX","new_password":"brand-new-password"}'
+
+# lost authenticator: email + MFA recovery code, removes the TOTP factors (public)
+curl -X POST http://localhost:8787/api/auth/mfa/recovery \
+  -H 'Content-Type: application/json' \
+  -d '{"identifier":"alice@example.com","recovery_code":"XXXX-XXXX"}'
 ```
 
-A successful reset revokes every session. Use `npm run reset-password -- <username>` on the server
-as a break-glass option (also useful when no recovery code is left).
-
-### Sessions and audit
+Both endpoints are rate limited (10 requests/minute per IP), return generic
+`400 invalid_recovery_code` errors and consume the code. A password reset also signs out every
+session through the Auth admin API. Break-glass on the server:
 
 ```bash
-curl http://localhost:8787/api/auth/sessions -H "Authorization: Bearer <token>"
-curl -X DELETE http://localhost:8787/api/auth/sessions/<id> -H "Authorization: Bearer <token>"
-curl -X DELETE http://localhost:8787/api/auth/sessions -H "Authorization: Bearer <token>"   # all but current
+npm run reset-password -- <email> [new_password]
 ```
 
-`POST /api/auth/change-password {current_password, new_password}` changes the password and revokes
-every other session.
+### Audit
 
-`/api/auth/me` returns the user with `email`, `display_name` and `mfa_enabled`. Security events
-(register, login, failures, MFA, resets, revocations) are recorded in `auth_events` with IP and
-user agent.
+Security-relevant app events (`password_reset`, `mfa_factor_reset`, `recovery_codes_regenerated`,
+`password_reset_cli`) are recorded in `auth_events` with IP and user agent. Logins, confirmations and
+factor changes are visible in the Supabase Auth logs and dashboard.
 
-Data is owned per user: sources, media, scan runs and the kDrive account are only visible to their
-owner. `GET /health` is public.
+Data is owned per user through `profiles`/`sources.owner_id` (both keyed to `auth.users.id`);
+`GET /health` is public.
 
 ## Health
 

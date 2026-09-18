@@ -27,7 +27,13 @@ cd photo-atlas-api
 npm install --no-audit --no-fund
 ```
 
-## 3. Database, option A: Docker + Supabase CLI (recommended for parity)
+## 3. Database
+
+Production uses **Supabase cloud** (PostgreSQL + PostGIS + Auth) with the API running on this VM;
+see [SUPABASE_CLOUD.md](SUPABASE_CLOUD.md) for the project, pooler URL and keys. The local options
+below are only for offline development and tests.
+
+### Option A: Docker + Supabase CLI (parity for schema work)
 
 ```bash
 sudo apt install -y docker.io
@@ -47,7 +53,7 @@ available at `postgresql://postgres:postgres@127.0.0.1:54322/postgres`.
 
 > The full Supabase stack needs ~7 GB of RAM and is not recommended on this device.
 
-## 4. Database, option B: system PostgreSQL + PostGIS (lightest)
+### Option B: system PostgreSQL + PostGIS (lightest)
 
 ```bash
 sudo apt install -y postgresql postgresql-17-postgis-3

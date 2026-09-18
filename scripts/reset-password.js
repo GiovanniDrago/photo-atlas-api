@@ -1,39 +1,46 @@
 import crypto from 'node:crypto';
 import 'dotenv/config';
-import pg from 'pg';
-import { hashPassword } from '../src/lib/passwords.js';
+import { query } from '../src/db.js';
+import { passwordPolicyError } from '../src/lib/passwords.js';
+import * as gotrue from '../src/lib/gotrue.js';
 
-const username = process.argv[2];
-const provided = process.argv[3];
-
-if (!username) {
-  console.error('usage: npm run reset-password -- <username> [new_password]');
-  process.exit(1);
+function randomPassword() {
+  return `pa-${crypto.randomBytes(12).toString('base64url')}`;
 }
-
-const password = provided && provided.length > 0 ? provided : crypto.randomBytes(9).toString('base64url');
 
 async function main() {
-  const pool = new pg.Pool({ connectionString: process.env.DATABASE_URL });
-  const { rows } = await pool.query('SELECT id FROM users WHERE lower(username) = lower($1)', [
-    username,
-  ]);
-  if (rows.length === 0) {
-    console.error(`user not found: ${username}`);
-    await pool.end();
+  const [, , emailArg, passwordArg] = process.argv;
+  const email = String(emailArg ?? '').trim().toLowerCase();
+  if (!email) {
+    console.error('usage: npm run reset-password -- <email> [new_password]');
     process.exit(1);
   }
-  await pool.query('UPDATE users SET password_hash = $2 WHERE id = $1', [
-    rows[0].id,
-    hashPassword(password),
-  ]);
-  await pool.query('DELETE FROM sessions WHERE user_id = $1', [rows[0].id]);
-  console.log(`password for ${username}: ${password}`);
-  console.log('all sessions revoked, the user must sign in again');
-  await pool.end();
+  const password = passwordArg || randomPassword();
+  const policyError = passwordPolicyError(password, { email });
+  if (policyError) {
+    console.error(policyError);
+    process.exit(1);
+  }
+
+  const user = await gotrue.adminFindUserByEmail(email);
+  if (!user) {
+    console.error(`no Supabase Auth user found for ${email}`);
+    process.exit(1);
+  }
+  await gotrue.adminUpdateUser(user.id, { password, email_confirm: true });
+  try {
+    await gotrue.adminSignOutUser(user.id);
+  } catch {
+    // Older GoTrue deployments may not expose the admin sign-out route.
+  }
+  await query("INSERT INTO auth_events (user_id, kind) VALUES ($1, 'password_reset_cli')", [user.id]);
+  console.log(`password updated for ${email}: ${password}`);
+  console.log('every existing session was signed out where supported');
 }
 
-main().catch((error) => {
-  console.error(error.message);
-  process.exit(1);
-});
+main()
+  .then(() => process.exit(0))
+  .catch((error) => {
+    console.error(error.message);
+    process.exit(1);
+  });

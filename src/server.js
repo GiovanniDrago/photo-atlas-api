@@ -6,7 +6,7 @@ import { config } from './config.js';
 import { pool } from './db.js';
 import { corsOptions } from './lib/cors.js';
 import { registerJsonBodyParser } from './lib/json-body-parser.js';
-import { registerAuthHook } from './lib/auth.js';
+import { registerAuthHook } from './lib/supabase-auth.js';
 import healthRoutes from './routes/health.js';
 import authRoutes from './routes/auth.js';
 import sourceRoutes from './routes/sources.js';

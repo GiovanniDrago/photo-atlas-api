@@ -1,17 +1,18 @@
 # Architecture
 
-Photo Atlas API is a small Node.js service in front of a PostgreSQL + PostGIS database.
-It indexes media metadata coming from local folders and Infomaniak kDrive and exposes it in three
-shapes: individual media, space clusters, and time buckets.
+Photo Atlas API is a small Node.js service in front of Supabase (PostgreSQL + PostGIS + Auth) and
+Infomaniak kDrive. It indexes media metadata coming from local folders and kDrive and exposes it in
+three shapes: individual media, space clusters, and time buckets.
 
 ```
                     +---------------------------+
                     |        Flutter app        |
                     | Android | Linux | Web     |
-                    +-------------+-------------+
-                                  |
-                                  | HTTP/JSON (CORS enabled)
-                                  v
+                    +------+-------------+------+
+                           |             |
+              Supabase Auth (GoTrue)     | HTTP/JSON (Bearer JWT)
+              signup/login/MFA/refresh   |
+                           v             v
                     +---------------------------+
                     |     Photo Atlas API       |
                     |  Fastify 5 + pg (Node 20) |
@@ -21,8 +22,9 @@ shapes: individual media, space clusters, and time buckets.
              |             |          |  |                    |
              v             v          v  v                    v
       +------------+  +---------+  +-------------------+  +----------------+
-      | PostgreSQL |  |  kDrive  |  |  local filesystem |  | EXIF enrichment|
-      |  + PostGIS |  | REST API |  |  (same machine)   |  | (exifr, lazy)  |
+      | Supabase   |  |  kDrive  |  |  local filesystem |  | EXIF enrichment|
+      |  Postgres  |  | REST API |  |  (thumbnails)     |  | (exifr, lazy)  |
+      |  + PostGIS |  |         |  |                   |  |                |
       +------------+  +---------+  +-------------------+  +----------------+
 ```
 
@@ -31,13 +33,16 @@ shapes: individual media, space clusters, and time buckets.
 | Component | Responsibility |
 |---|---|
 | `src/server.js` | HTTP bootstrap, CORS, error mapping, graceful shutdown |
-| `src/routes/*` | One file per resource: health, sources, media, clusters, timeline, scan-runs, kdrive |
+| `src/routes/*` | One file per resource: health, auth, sources, media, clusters, timeline, scan-runs, kdrive |
+| `src/lib/supabase-auth.js` | JWT verification with `jose` + JWKS, profile mirror, MFA (AAL2) enforcement |
+| `src/lib/gotrue.js` | Supabase Auth admin client (users, password reset, TOTP factors) |
 | `src/services/kdrive.js` | kDrive REST client with 60 req/min throttling, pagination, prefix downloads |
 | `src/services/enrich.js` | EXIF/GPS extraction with `exifr` from partial file prefixes |
 | `src/services/media-index.js` | Batch upsert of media rows, scan-run bookkeeping |
 | `src/lib/crypto.js` | AES-256-GCM encryption of the kDrive token at rest |
 | `supabase/migrations` | Portable SQL schema and aggregation functions |
-| `scripts/*` | Local database bootstrap, migrations, seed, dev runner |
+| `netlify/email-confirm` | Static page returned by Supabase Auth after email confirmation |
+| `scripts/*` | Local database bootstrap, migrations, seed, Netlify page zip, dev runner |
 
 ## Scan pipelines
 

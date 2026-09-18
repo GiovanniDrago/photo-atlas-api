@@ -3,8 +3,8 @@ import assert from 'node:assert/strict';
 import pg from 'pg';
 import '../src/lib/pg-types.js';
 
-const databaseUrl = process.env.DATABASE_URL;
-const skip = databaseUrl ? false : 'DATABASE_URL is not set';
+const databaseUrl = process.env.TEST_DATABASE_URL;
+const skip = databaseUrl ? false : 'TEST_DATABASE_URL is not set';
 
 test('bigint and numeric columns are returned as numbers', { skip }, async (t) => {
   const pool = new pg.Pool({ connectionString: databaseUrl });

@@ -17,14 +17,6 @@ export function verifyPassword(password, stored) {
   return crypto.timingSafeEqual(derived, expectedBuffer);
 }
 
-export function generateSessionToken() {
-  return crypto.randomBytes(32).toString('base64url');
-}
-
-export function hashToken(token) {
-  return crypto.createHash('sha256').update(token).digest('hex');
-}
-
 const COMMON_PASSWORDS = new Set([
   'password', 'password1', 'password123', '1234567890', 'qwertyuiop',
   'letmein123', 'photoatlas', 'administrator', 'iloveyou123', 'changeme123',
