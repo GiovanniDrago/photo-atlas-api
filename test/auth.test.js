@@ -227,7 +227,7 @@ test('MFA setup, login challenge, TOTP and recovery code verification', { skip }
     url: '/api/auth/register',
     payload: { email, password },
   });
-  assert.equal(register.statusCode, 201);
+  assert.equal(register.statusCode, 201, register.body);
   const token = register.json().token;
 
   const setup = await app.inject({
@@ -235,7 +235,7 @@ test('MFA setup, login challenge, TOTP and recovery code verification', { skip }
     url: '/api/auth/mfa/setup',
     headers: { authorization: `Bearer ${token}` },
   });
-  assert.equal(setup.statusCode, 200);
+  assert.equal(setup.statusCode, 200, setup.body);
   const { secret, otpauth_uri: uri } = setup.json();
   assert.match(secret, /^[A-Z2-7]+$/);
   assert.match(uri, /^otpauth:\/\/totp\//);
@@ -254,7 +254,7 @@ test('MFA setup, login challenge, TOTP and recovery code verification', { skip }
     headers: { authorization: `Bearer ${token}` },
     payload: { code: generateTotp(secret) },
   });
-  assert.equal(enable.statusCode, 200);
+  assert.equal(enable.statusCode, 200, enable.body);
   assert.equal(enable.json().user.mfa_enabled, true);
   const mfaCodes = enable.json().recovery_codes;
   assert.equal(mfaCodes.length, 8);
