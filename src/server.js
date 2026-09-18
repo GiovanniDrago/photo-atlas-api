@@ -1,6 +1,7 @@
 import os from 'node:os';
 import Fastify from 'fastify';
 import cors from '@fastify/cors';
+import rateLimit from '@fastify/rate-limit';
 import { config } from './config.js';
 import { pool } from './db.js';
 import { corsOptions } from './lib/cors.js';
@@ -23,6 +24,11 @@ const app = Fastify({
 registerJsonBodyParser(app);
 
 await app.register(cors, corsOptions);
+
+await app.register(rateLimit, {
+  global: false,
+  keyGenerator: (request) => request.ip,
+});
 
 registerAuthHook(app);
 

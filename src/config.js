@@ -15,6 +15,7 @@ export const config = {
   databaseUrl: process.env.DATABASE_URL ?? 'postgresql://photo_atlas:photo_atlas@127.0.0.1:54329/photo_atlas',
   corsOrigin: process.env.CORS_ORIGIN ?? '*',
   kdriveEncKey: process.env.KDRIVE_ENC_KEY ?? '',
+  authEncKey: process.env.AUTH_ENC_KEY ?? process.env.KDRIVE_ENC_KEY ?? '',
   kdriveApiBase: process.env.KDRIVE_API_BASE ?? 'https://api.infomaniak.com',
   mediaUrlSecret: process.env.MEDIA_URL_SECRET ?? process.env.KDRIVE_ENC_KEY ?? 'photo-atlas-dev-secret',
   mediaCacheDir: process.env.MEDIA_CACHE_DIR ?? path.join(os.homedir(), '.cache', 'photo-atlas'),

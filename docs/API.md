@@ -22,44 +22,96 @@ readable local files always carry a `download_url`.
 
 ## Authentication
 
-Every `/api/*` route except `register` and `login` requires a session token:
+Every `/api/*` route except `register`, `login` and `password/reset-with-code` requires a session
+token:
 
 ```
 Authorization: Bearer <token>
 ```
 
-Sessions last 30 days and are revoked by `POST /api/auth/logout`.
+Sessions last 30 days, are stored hashed server-side and are revoked by `POST /api/auth/logout`,
+by a password change, by a password reset or from the session list.
+
+### Registration and login
 
 ```bash
-# create an account (username and password only in this dev phase)
+# register with email + password (username defaults to the email local part, display_name optional)
 curl -X POST http://localhost:8787/api/auth/register \
   -H 'Content-Type: application/json' \
-  -d '{"username":"alice","password":"pw"}'
+  -d '{"email":"alice@example.com","password":"correct-horse-battery","display_name":"Alice"}'
 
-# log in again later
+# the response also contains one-time recovery codes:
+#   { "user": {...}, "token": "...", "expires_at": "...",
+#     "recovery_codes": { "password": ["XXXX-XXXX", ...8], "mfa": ["XXXX-XXXX", ...8] } }
+
+# login with the email or the username
 curl -X POST http://localhost:8787/api/auth/login \
   -H 'Content-Type: application/json' \
-  -d '{"username":"alice","password":"pw"}'
-
-# current user
-curl http://localhost:8787/api/auth/me -H "Authorization: Bearer <token>"
-
-# revoke the session
-curl -X POST http://localhost:8787/api/auth/logout -H "Authorization: Bearer <token>"
-
-# change the password (revokes every other session)
-curl -X POST http://localhost:8787/api/auth/change-password \
-  -H "Authorization: Bearer <token>" -H 'Content-Type: application/json' \
-  -d '{"current_password":"old","new_password":"new"}'
+  -d '{"identifier":"alice@example.com","password":"correct-horse-battery"}'
 ```
 
-Forgotten passwords have no email flow in this dev phase: run
-`npm run reset-password -- <username> [new_password]` on the server (revokes all sessions).
+Passwords are hashed with scrypt and must be 10-200 characters, must not contain the email local
+part and are rejected if they appear in a small common-password list. Ten failed logins lock the
+account for 15 minutes; `/api/auth/*` is rate limited per IP.
 
-Both endpoints return `{ "user": {...}, "token": "...", "expires_at": "..." }`. Registration is
-open, passwords are hashed with scrypt, and the raw token is never stored server side (only its
-SHA-256). Data is owned per user: sources, media, scan runs and the kDrive account are only visible
-to their owner. `GET /health` is public.
+When MFA is enabled, `login` returns `"mfa_required": true` and a short-lived (10 minutes) session
+that can only call `POST /api/auth/mfa/verify` and `POST /api/auth/logout`. Any other route returns
+`403 { "error": "mfa_required" }`.
+
+### Two-factor authentication (TOTP)
+
+```bash
+curl -X POST http://localhost:8787/api/auth/mfa/setup -H "Authorization: Bearer <token>"
+# -> { "secret": "BASE32...", "otpauth_uri": "otpauth://totp/..." }
+
+curl -X POST http://localhost:8787/api/auth/mfa/enable \
+  -H "Authorization: Bearer <token>" -H 'Content-Type: application/json' \
+  -d '{"code":"123456"}'
+# -> { "ok": true, "user": {...}, "recovery_codes": ["XXXX-XXXX", ...8] }
+
+curl -X POST http://localhost:8787/api/auth/mfa/verify \
+  -H "Authorization: Bearer <pending token>" -H 'Content-Type: application/json' \
+  -d '{"code":"123456"}'          # or one MFA recovery code
+
+curl -X POST http://localhost:8787/api/auth/mfa/disable \
+  -H "Authorization: Bearer <token>" -H 'Content-Type: application/json' \
+  -d '{"password":"..."}'
+```
+
+Codes follow RFC 6238 (SHA-1, 6 digits, 30 s, ±1 step). Recovery codes are single use; regenerate
+them with `POST /api/auth/mfa/recovery-codes` (requires the password).
+
+### Password reset with a recovery code
+
+There is no email flow. Each account gets 8 single-use password recovery codes
+(`POST /api/auth/recovery-codes` regenerates them, requires the password):
+
+```bash
+curl -X POST http://localhost:8787/api/auth/password/reset-with-code \
+  -H 'Content-Type: application/json' \
+  -d '{"identifier":"alice@example.com","recovery_code":"XXXX-XXXX","new_password":"brand-new-pass"}'
+```
+
+A successful reset revokes every session. Use `npm run reset-password -- <username>` on the server
+as a break-glass option (also useful when no recovery code is left).
+
+### Sessions and audit
+
+```bash
+curl http://localhost:8787/api/auth/sessions -H "Authorization: Bearer <token>"
+curl -X DELETE http://localhost:8787/api/auth/sessions/<id> -H "Authorization: Bearer <token>"
+curl -X DELETE http://localhost:8787/api/auth/sessions -H "Authorization: Bearer <token>"   # all but current
+```
+
+`POST /api/auth/change-password {current_password, new_password}` changes the password and revokes
+every other session.
+
+`/api/auth/me` returns the user with `email`, `display_name` and `mfa_enabled`. Security events
+(register, login, failures, MFA, resets, revocations) are recorded in `auth_events` with IP and
+user agent.
+
+Data is owned per user: sources, media, scan runs and the kDrive account are only visible to their
+owner. `GET /health` is public.
 
 ## Health
 
