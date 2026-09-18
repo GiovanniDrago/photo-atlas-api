@@ -66,8 +66,14 @@ Each account gets 8 one-time password-reset codes and 8 one-time MFA-recovery co
 them after signup/regeneration; the API stores only scrypt hashes.
 
 ```bash
-# regenerate the password codes (authenticated; the app re-authenticates first)
-curl -X POST http://localhost:8787/api/auth/recovery-codes -H "Authorization: Bearer <token>"
+# remaining unused codes (authenticated)
+curl http://localhost:8787/api/auth/recovery-codes -H "Authorization: Bearer <token>"
+# { "password_remaining": 8, "mfa_remaining": 0 }
+
+# regenerate codes: kind "password" (default) or "mfa"
+curl -X POST http://localhost:8787/api/auth/recovery-codes \
+  -H "Authorization: Bearer <token>" -H 'Content-Type: application/json' \
+  -d '{"kind":"password"}'
 # { "recovery_codes": ["XXXX-XXXX", ...8] }
 
 # forgotten password: email + code + new password (public)

@@ -10,6 +10,8 @@ import { startJwksServer, startFakeGoTrue, signToken } from './helpers/supabase-
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 const skip = databaseUrl ? false : 'TEST_DATABASE_URL is not set';
+// Route handlers use the shared pool; point it at the throwaway test database.
+if (databaseUrl) process.env.DATABASE_URL = databaseUrl;
 
 let jwks;
 let fakeGoTrue;
@@ -216,6 +218,32 @@ test('recovery codes regenerate and reset the Supabase password once', { skip },
   assert.equal(codesResponse.statusCode, 200, codesResponse.body);
   const codes = codesResponse.json().recovery_codes;
   assert.equal(codes.length, 8);
+
+  const counts = await app.inject({
+    method: 'GET',
+    url: '/api/auth/recovery-codes',
+    headers: { authorization: `Bearer ${token}` },
+  });
+  assert.equal(counts.statusCode, 200, counts.body);
+  assert.equal(counts.json().password_remaining, 8);
+  assert.equal(counts.json().mfa_remaining, 0);
+
+  const mfaCodes = await app.inject({
+    method: 'POST',
+    url: '/api/auth/recovery-codes',
+    headers: { authorization: `Bearer ${token}` },
+    payload: { kind: 'mfa' },
+  });
+  assert.equal(mfaCodes.statusCode, 200, mfaCodes.body);
+  assert.equal(mfaCodes.json().recovery_codes.length, 8);
+
+  const invalidKind = await app.inject({
+    method: 'POST',
+    url: '/api/auth/recovery-codes',
+    headers: { authorization: `Bearer ${token}` },
+    payload: { kind: 'nope' },
+  });
+  assert.equal(invalidKind.statusCode, 400);
 
   const weak = await app.inject({
     method: 'POST',

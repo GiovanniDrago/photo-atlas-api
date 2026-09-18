@@ -91,12 +91,40 @@ export default async function authRoutes(app) {
     return { user: publicUser(profile, authUser) };
   });
 
+  app.get('/api/auth/recovery-codes', async (request) => {
+    const { rows } = await query(
+      `SELECT
+         count(*) FILTER (WHERE used_at IS NULL) AS password_remaining
+       FROM password_recovery_codes WHERE user_id = $1`,
+      [request.user.id],
+    );
+    const { rows: mfaRows } = await query(
+      `SELECT count(*) FILTER (WHERE used_at IS NULL) AS mfa_remaining
+       FROM mfa_recovery_codes WHERE user_id = $1`,
+      [request.user.id],
+    );
+    return {
+      password_remaining: Number(rows[0]?.password_remaining ?? 0),
+      mfa_remaining: Number(mfaRows[0]?.mfa_remaining ?? 0),
+    };
+  });
+
   app.post(
     '/api/auth/recovery-codes',
     { config: { rateLimit: { max: 10, timeWindow: '1 minute' } } },
-    async (request) => {
-      const codes = await issueRecoveryCodes(request.user.id, 'password_recovery_codes');
-      await recordAuthEvent(request.user.id, 'recovery_codes_regenerated', request);
+    async (request, reply) => {
+      const { kind } = request.body ?? {};
+      const table =
+        kind === 'mfa'
+          ? 'mfa_recovery_codes'
+          : kind === 'password' || kind === undefined
+            ? 'password_recovery_codes'
+            : null;
+      if (!table) {
+        return reply.code(400).send({ error: "kind must be 'password' or 'mfa'" });
+      }
+      const codes = await issueRecoveryCodes(request.user.id, table);
+      await recordAuthEvent(request.user.id, `recovery_codes_regenerated:${kind ?? 'password'}`, request);
       return { recovery_codes: codes };
     },
   );

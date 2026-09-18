@@ -2,18 +2,29 @@ import pg from 'pg';
 import './lib/pg-types.js';
 import { config } from './config.js';
 
-export const pool = new pg.Pool({
-  connectionString: config.databaseUrl,
-  max: 5,
-  idleTimeoutMillis: 30000,
-});
+let pool = null;
+
+function getPool() {
+  if (!pool) {
+    pool = new pg.Pool({
+      connectionString: process.env.DATABASE_URL ?? config.databaseUrl,
+      max: 5,
+      idleTimeoutMillis: 30000,
+    });
+  }
+  return pool;
+}
+
+export function databasePool() {
+  return getPool();
+}
 
 export async function query(text, params) {
-  return pool.query(text, params);
+  return getPool().query(text, params);
 }
 
 export async function withTransaction(fn) {
-  const client = await pool.connect();
+  const client = await getPool().connect();
   try {
     await client.query('BEGIN');
     const result = await fn(client);
@@ -24,5 +35,12 @@ export async function withTransaction(fn) {
     throw error;
   } finally {
     client.release();
+  }
+}
+
+export async function closePool() {
+  if (pool) {
+    await pool.end();
+    pool = null;
   }
 }
