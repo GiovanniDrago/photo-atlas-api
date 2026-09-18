@@ -3,7 +3,7 @@ import Fastify from 'fastify';
 import cors from '@fastify/cors';
 import rateLimit from '@fastify/rate-limit';
 import { config } from './config.js';
-import { pool } from './db.js';
+import { closePool } from './db.js';
 import { corsOptions } from './lib/cors.js';
 import { registerJsonBodyParser } from './lib/json-body-parser.js';
 import { registerAuthHook } from './lib/supabase-auth.js';
@@ -49,7 +49,7 @@ app.setErrorHandler((error, request, reply) => {
 
 const shutdown = async () => {
   await app.close();
-  await pool.end();
+  await closePool();
   process.exit(0);
 };
 
