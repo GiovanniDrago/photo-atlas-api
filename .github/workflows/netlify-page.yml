@@ -15,11 +15,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Build the static page zip
+      # The artifact contains index.html and _redirects at its root, so the
+      # downloaded zip can be dragged straight into Netlify Drop.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: photo-atlas-confirm-email
+          path: netlify/email-confirm/
+          if-no-files-found: error
+
+      - name: Also build the standalone zip (for manual uploads)
         run: bash scripts/build-netlify-page.sh
 
       - uses: actions/upload-artifact@v4
         with:
-          name: photo-atlas-confirm-email
+          name: photo-atlas-confirm-email-zip
           path: dist/photo-atlas-confirm-email.zip
           if-no-files-found: error
