@@ -15,6 +15,7 @@
     "seed": "node scripts/seed.js",
     "reset-password": "node scripts/reset-password.js",
     "db:local": "bash scripts/db-local.sh",
+    "kdrive-upload-check": "node scripts/kdrive-upload-check.js",
     "test": "node --test test/"
   },
   "dependencies": {

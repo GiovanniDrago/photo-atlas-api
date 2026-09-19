@@ -151,6 +151,10 @@ export class KDriveClient {
     return this.requestStream(`/2/drive/${this.driveId}/files/${fileId}/download`);
   }
 
+  async deleteFile(fileId) {
+    return this.requestJson(`/2/drive/${this.driveId}/files/${fileId}`, { method: 'DELETE' });
+  }
+
   async findChildFolder(parentId, name) {
     let cursor;
     do {
