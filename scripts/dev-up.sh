@@ -20,7 +20,12 @@ fi
 
 db_host="$(printf '%s' "${DATABASE_URL:-}" | sed -E 's#^[a-z+]+://([^@/]*@)?([^:/?]+).*#\2#')"
 case "$db_host" in
-  ''|localhost|127.0.0.1|::1)
+  '')
+    if [ -f "$ROOT_DIR/.env" ]; then
+      echo "[dev-up] warning: DATABASE_URL is empty or unparsable in .env; not starting a local database"
+    fi
+    ;;
+  localhost|127.0.0.1|::1)
     if ! pg_isready -q -h 127.0.0.1 -p 5432 2>/dev/null; then
       echo "[dev-up] PostgreSQL is not ready, starting it"
       bash "$ROOT_DIR/scripts/db-local.sh" start
@@ -31,8 +36,13 @@ case "$db_host" in
     ;;
 esac
 
+API_UNIT="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/photo-atlas-api.service"
 if ss -ltn 2>/dev/null | grep -q ":${API_PORT} "; then
   echo "[dev-up] API already listening on ${API_PORT}"
+elif [ -f "$API_UNIT" ]; then
+  systemctl --user start photo-atlas-api.service
+  sleep 1
+  echo "[dev-up] API started with systemd (logs: journalctl --user -u photo-atlas-api)"
 else
   (
     cd "$ROOT_DIR"

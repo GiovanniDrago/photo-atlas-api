@@ -39,6 +39,31 @@ Photo Atlas API ready: http://localhost:8787  |  http://<vm-ip>:8787
 The VM IP comes from DHCP and can change when the VM restarts; the web app detects its own host
 automatically, so opening the printed `Web (phone)` URL is enough.
 
+## Autostart (systemd user service)
+
+The API runs as a systemd **user** service, so it starts with the `droid` session (the same
+mechanism as the opencode-web service) and restarts on failure:
+
+```bash
+bash scripts/install-services.sh          # install/update + enable + start (idempotent)
+
+systemctl --user status photo-atlas-api   # state
+systemctl --user restart photo-atlas-api  # restart
+journalctl --user -u photo-atlas-api -f   # live logs (journal)
+```
+
+Logs go to the systemd journal (no `.run/api.log` when the service manages the process).
+`dev-up.sh` starts the unit when it exists and falls back to a `nohup` process otherwise;
+`dev-down.sh` stops it. The web preview (port 8080) is not managed by systemd: use
+`photo-atlas-app/scripts/serve-web.sh`.
+
+By default the service starts with the user session only; to also start it at boot without a login
+(once, needs sudo):
+
+```bash
+sudo loginctl enable-linger droid
+```
+
 ## Day-to-day
 
 ```bash
