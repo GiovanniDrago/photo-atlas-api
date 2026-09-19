@@ -48,7 +48,7 @@ export class KDriveClient {
     this.lastRequestAt = Date.now();
   }
 
-  async requestJson(pathname, { method = 'GET', query: queryParams } = {}) {
+  async requestJson(pathname, { method = 'GET', query: queryParams, body } = {}) {
     await this.throttle();
     const url = new URL(`${this.baseUrl}${pathname}`);
     for (const [key, value] of Object.entries(queryParams ?? {})) {
@@ -56,7 +56,12 @@ export class KDriveClient {
     }
     const response = await fetch(url, {
       method,
-      headers: { Authorization: `Bearer ${this.token}`, Accept: 'application/json' },
+      headers: {
+        Authorization: `Bearer ${this.token}`,
+        Accept: 'application/json',
+        ...(body ? { 'Content-Type': 'application/json' } : {}),
+      },
+      body: body ? JSON.stringify(body) : undefined,
     });
     const text = await response.text();
     if (!response.ok) {
@@ -144,5 +149,113 @@ export class KDriveClient {
 
   async download(fileId) {
     return this.requestStream(`/2/drive/${this.driveId}/files/${fileId}/download`);
+  }
+
+  async findChildFolder(parentId, name) {
+    let cursor;
+    do {
+      const page = await this.listChildren(parentId, { type: 'dir', cursor });
+      const match = page.items.find((item) => item.name === name);
+      if (match) return match;
+      cursor = page.hasMore ? page.cursor : undefined;
+    } while (cursor);
+    return null;
+  }
+
+  async createFolder(parentId, name) {
+    const body = await this.requestJson(`/3/drive/${this.driveId}/files/${parentId}/directory`, {
+      method: 'POST',
+      body: { name },
+    });
+    return body.data ?? body;
+  }
+
+  async ensureFolderPath(parts) {
+    let parentId = 1;
+    const walked = [];
+    for (const part of parts) {
+      walked.push(part);
+      const existing = await this.findChildFolder(parentId, part);
+      if (existing) {
+        parentId = existing.id;
+        continue;
+      }
+      const created = await this.createFolder(parentId, part);
+      const createdId = created?.id ?? created?.data?.id;
+      if (!createdId) {
+        throw new Error(`kDrive folder creation failed for ${walked.join('/')}`);
+      }
+      parentId = createdId;
+    }
+    return { id: parentId, path: walked.join('/') };
+  }
+
+  async uploadFile({ parentId, name, size, body }) {
+    await this.throttle();
+    const url = new URL(`${this.baseUrl}/3/drive/${this.driveId}/upload`);
+    url.searchParams.set('directory_id', String(parentId));
+    url.searchParams.set('file_name', name);
+    url.searchParams.set('total_size', String(size));
+    url.searchParams.set('conflict', 'rename');
+    const isStream = body && typeof body !== 'string' && !Buffer.isBuffer(body);
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${this.token}`,
+        'Content-Type': 'application/octet-stream',
+      },
+      body,
+      ...(isStream ? { duplex: 'half' } : {}),
+    });
+    const text = await response.text();
+    if (!response.ok) {
+      throw new Error(`kDrive upload failed (${response.status}): ${text.slice(0, 300)}`);
+    }
+    const parsed = text ? JSON.parse(text) : {};
+    return parsed.data ?? parsed;
+  }
+
+  async startUploadSession({ parentId, name, size, totalChunks, conflict = 'rename' }) {
+    const body = await this.requestJson(`/3/drive/${this.driveId}/upload/session/start`, {
+      method: 'POST',
+      body: {
+        file_name: name,
+        directory_id: parentId,
+        total_size: size,
+        total_chunks: totalChunks,
+        conflict,
+      },
+    });
+    return body.data ?? body;
+  }
+
+  async uploadChunk(uploadUrl, chunk, { index, sessionToken } = {}) {
+    await this.throttle();
+    const url = new URL(uploadUrl);
+    if (index !== undefined && index !== null) url.searchParams.set('chunk', String(index));
+    const isStream = chunk && typeof chunk !== 'string' && !Buffer.isBuffer(chunk);
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${this.token}`,
+        'Content-Type': 'application/octet-stream',
+        ...(sessionToken ? { 'X-Session-Token': sessionToken } : {}),
+      },
+      body: chunk,
+      ...(isStream ? { duplex: 'half' } : {}),
+    });
+    const text = await response.text();
+    if (!response.ok) {
+      throw new Error(`kDrive chunk upload failed (${response.status}): ${text.slice(0, 300)}`);
+    }
+    return text ? JSON.parse(text) : {};
+  }
+
+  async finishUploadSession(sessionToken) {
+    const body = await this.requestJson(`/3/drive/${this.driveId}/upload/session/finish`, {
+      method: 'POST',
+      body: { session_token: sessionToken },
+    });
+    return body.data ?? body;
   }
 }

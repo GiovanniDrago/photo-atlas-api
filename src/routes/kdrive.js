@@ -5,7 +5,7 @@ import { KDriveClient, mediaTypeOf } from '../services/kdrive.js';
 import { getKDriveClient } from '../services/kdrive-account.js';
 import { ensureThumbnail } from '../services/media-assets.js';
 import { extractImageMetadata, computeMetadataStatus } from '../services/enrich.js';
-import { upsertMediaItems, updateScanRun } from '../services/media-index.js';
+import { upsertMediaItems, updateScanRun, markKdriveBacked } from '../services/media-index.js';
 
 const BATCH_SIZE = 100;
 
@@ -59,7 +59,9 @@ async function runScan({ scanRunId, sourceId, ownerId, client, folderId, recursi
   const flush = async () => {
     if (batch.length === 0) return;
     try {
-      filesIndexed += await upsertMediaItems(sourceId, batch);
+      const rows = await upsertMediaItems(sourceId, batch);
+      filesIndexed += rows.length;
+      await markKdriveBacked(sourceId, batch.map((item) => item.external_key));
     } catch (error) {
       errors.push(String(error.message));
     }

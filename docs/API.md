@@ -200,6 +200,48 @@ none = `none`). Maximum 500 items per request.
 (≤ 256 KB) per asset because the API cannot read files that only exist on the phone. Invalid or
 oversized payloads are ignored and the item is still indexed.
 
+## Backup to kDrive
+
+Originals are uploaded to `KDRIVE_BASE_PATH` (default `Media/PhotoAtlas`): per-folder backups land
+in `Media/PhotoAtlas/<folder>`, manual uploads in `Media/PhotoAtlas/Manual`. Files keep their name
+and kDrive is asked to rename on conflict, so nothing is ever overwritten. Uploads are driven by the
+app; the API streams the body to a temporary file, computes the SHA-256 while streaming, extracts
+EXIF from images (server-side metadata is authoritative), then uploads to kDrive (direct up to
+1 GB, chunked session above) and records the state in `media_items`.
+
+```bash
+# register this device (fingerprint is stable per installation)
+curl -X POST http://localhost:8787/api/devices -H "Authorization: Bearer <token>" \
+  -H 'Content-Type: application/json' \
+  -d '{"fingerprint":"<uuid>","name":"Pixel","platform":"android"}'
+
+# queue of items still to upload, and verification queue
+curl "http://localhost:8787/api/backup/pending?limit=100" -H "Authorization: Bearer <token>"
+curl "http://localhost:8787/api/backup/verify-queue?limit=100" -H "Authorization: Bearer <token>"
+
+# per-source counters (uploaded / pending / failed, bytes)
+curl http://localhost:8787/api/backup/status -H "Authorization: Bearer <token>"
+
+# upload one original (?destination=manual puts it in Media/PhotoAtlas/Manual)
+curl -X POST "http://localhost:8787/api/media/<uuid>/upload?destination=manual" \
+  -H "Authorization: Bearer <token>" -H 'Content-Type: application/octet-stream' \
+  --data-binary @IMG_0001.jpg
+
+# check that a backed-up file still exists on kDrive (missing -> back to pending)
+curl -X POST http://localhost:8787/api/media/<uuid>/verify -H "Authorization: Bearer <token>"
+
+# runs (kind backup|verify) with counters
+curl -X POST http://localhost:8787/api/backup/runs -H "Authorization: Bearer <token>" \
+  -H 'Content-Type: application/json' -d '{"kind":"backup"}'
+curl -X PATCH http://localhost:8787/api/backup/runs/<uuid> -H "Authorization: Bearer <token>" \
+  -H 'Content-Type: application/json' -d '{"status":"completed","files_uploaded":12}'
+```
+
+Media payloads now include `backup_status`, `kdrive_file_id`, `backed_up_at` and `backup_error`;
+`GET /api/media` accepts `backup_status=none,pending` and `device_id=`. The batch endpoint
+(`POST /api/media/batch`) also returns `items: [{id, external_key}]` so the app can upload right
+after indexing. kDrive-sourced items are marked `uploaded` automatically.
+
 ## Clusters (planet map)
 
 ```

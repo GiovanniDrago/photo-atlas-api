@@ -118,6 +118,10 @@ automatic delta job after each scan: `GET /api/kdrive/previews`.
 | `KDRIVE_ENC_KEY` | empty | 64 hex chars; required to connect kDrive |
 | `LOCAL_MEDIA_ROOTS` | empty | Colon separated allowlist for local thumbnails |
 | `KDRIVE_API_BASE` | `https://api.infomaniak.com` | Override for tests |
+| `KDRIVE_BASE_PATH` | `Media/PhotoAtlas` | kDrive base folder for backups (`/Manual` for manual uploads) |
+| `MEDIA_UPLOAD_TMP_DIR` | `~/.cache/photo-atlas/uploads` | Temporary files while uploading to kDrive |
+| `UPLOAD_MAX_BYTES` | 8 GiB | Route limit for `POST /api/media/:id/upload` |
+| `KDRIVE_MIN_INTERVAL_MS` | `1100` | Throttle between kDrive requests (set 0 in tests) |
 | `MEDIA_URL_SECRET` | `KDRIVE_ENC_KEY` | HMAC secret for signed thumbnail/download URLs |
 | `MEDIA_CACHE_DIR` | `~/.cache/photo-atlas` | Thumbnail cache directory |
 

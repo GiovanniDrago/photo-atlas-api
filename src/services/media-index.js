@@ -83,7 +83,24 @@ export async function upsertMediaItems(sourceId, items) {
   if (thumbnails.size > 0) {
     await storeThumbnails(rows, thumbnails);
   }
-  return rows.length;
+  return rows;
+}
+
+export async function markKdriveBacked(sourceId, externalKeys) {
+  if (!externalKeys || externalKeys.length === 0) return 0;
+  const { rowCount } = await query(
+    `UPDATE media_items SET
+       backup_status = 'uploaded',
+       kdrive_file_id = CASE
+         WHEN external_key ~ '^[0-9]+$' THEN external_key::bigint
+         ELSE kdrive_file_id
+       END,
+       backed_up_at = COALESCE(backed_up_at, now()),
+       updated_at = now()
+     WHERE source_id = $1 AND external_key = ANY($2::text[])`,
+    [sourceId, externalKeys],
+  );
+  return rowCount;
 }
 
 async function storeThumbnails(rows, thumbnails) {

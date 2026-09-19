@@ -12,6 +12,7 @@ const BASE_FIELDS = `
   m.size_bytes, m.taken_at, m.file_created_at, m.modified_at, m.lat, m.lon,
   (m.lat IS NOT NULL AND m.lon IS NOT NULL) AS has_gps,
   m.metadata_status, m.width, m.height, m.duration_s, m.indexed_at, m.updated_at,
+  m.backup_status, m.kdrive_file_id, m.backed_up_at, m.backup_error,
   s.kind AS source_kind, s.label AS source_label
 `;
 
@@ -67,6 +68,18 @@ export default async function mediaRoutes(app) {
     if (q.source_id && isUuid(q.source_id)) conditions.push(`m.source_id = ${push(q.source_id)}`);
     if (q.has_gps === 'true') conditions.push('m.lat IS NOT NULL');
     if (q.has_gps === 'false') conditions.push('m.lat IS NULL');
+    if (q.backup_status) {
+      const statuses = String(q.backup_status)
+        .split(',')
+        .map((value) => value.trim())
+        .filter((value) => ['none', 'pending', 'uploading', 'uploaded', 'failed', 'skipped'].includes(value));
+      if (statuses.length > 0) {
+        conditions.push(`m.backup_status = ANY(${push(statuses)}::text[])`);
+      }
+    }
+    if (q.source_id == null && q.device_id && isUuid(q.device_id)) {
+      conditions.push(`s.device_id = ${push(q.device_id)}`);
+    }
     if (q.q) conditions.push(`m.name ILIKE ${push(`%${q.q}%`)}`);
     conditions.push(`s.owner_id = ${push(request.user.id)}`);
 
@@ -117,11 +130,14 @@ export default async function mediaRoutes(app) {
       return reply.code(404).send({ error: 'source not found' });
     }
 
-    const indexed = await upsertMediaItems(body.source_id, items);
+    const rows = await upsertMediaItems(body.source_id, items);
     if (body.scan_run_id && isUuid(body.scan_run_id)) {
-      await updateScanRun(body.scan_run_id, { files_seen: items.length, files_indexed: indexed });
+      await updateScanRun(body.scan_run_id, { files_seen: items.length, files_indexed: rows.length });
     }
-    return { indexed };
+    return {
+      indexed: rows.length,
+      items: rows.map((row) => ({ id: row.id, external_key: row.external_key })),
+    };
   });
 
   app.get('/api/media/:id', async (request, reply) => {

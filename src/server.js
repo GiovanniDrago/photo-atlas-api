@@ -6,10 +6,13 @@ import { config } from './config.js';
 import { closePool } from './db.js';
 import { corsOptions } from './lib/cors.js';
 import { registerJsonBodyParser } from './lib/json-body-parser.js';
+import { registerOctetStreamParser } from './lib/octet-stream-parser.js';
 import { registerAuthHook } from './lib/supabase-auth.js';
+import { sweepUploadTmpDir } from './services/backup.js';
 import healthRoutes from './routes/health.js';
 import authRoutes from './routes/auth.js';
 import confirmPageRoutes from './routes/confirm-page.js';
+import backupRoutes from './routes/backup.js';
 import sourceRoutes from './routes/sources.js';
 import mediaRoutes from './routes/media.js';
 import clusterRoutes from './routes/clusters.js';
@@ -24,6 +27,8 @@ const app = Fastify({
 
 registerJsonBodyParser(app);
 
+registerOctetStreamParser(app);
+
 await app.register(cors, corsOptions);
 
 await app.register(rateLimit, {
@@ -36,6 +41,7 @@ registerAuthHook(app);
 await app.register(healthRoutes);
 await app.register(confirmPageRoutes);
 await app.register(authRoutes);
+await app.register(backupRoutes);
 await app.register(sourceRoutes);
 await app.register(mediaRoutes);
 await app.register(clusterRoutes);
@@ -71,6 +77,8 @@ function reachableUrls(port) {
 }
 
 await app.listen({ port: config.port, host: config.host });
+
+sweepUploadTmpDir().catch(() => {});
 
 if (config.localMediaRoots.length === 0) {
   app.log.warn('LOCAL_MEDIA_ROOTS is empty: the thumbnail endpoint will serve any readable path. Set it before exposing the API.');

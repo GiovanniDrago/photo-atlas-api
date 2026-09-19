@@ -24,6 +24,7 @@ export async function getKDriveClient(userId) {
       token,
       driveId: Number(account.drive_id),
       baseUrl: config.kdriveApiBase,
+      minIntervalMs: config.kdriveMinIntervalMs,
     }),
   };
 }

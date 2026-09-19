@@ -30,6 +30,19 @@ Row Level Security is enabled with **no policies** on every app table
 (`0012_rls_hardening.sql`), and the `anon`/`authenticated` grants are revoked: the Supabase Data API
 cannot read anything while the API (table owner) works normally.
 
+### Backup
+
+| Table | Columns | Notes |
+|---|---|---|
+| `devices` | `id`, `owner_id`, `fingerprint`, `name`, `platform`, `created_at`, `last_seen_at` | one row per app installation |
+| `backup_runs` | `id`, `owner_id`, `kind` (`backup`/`verify`), `source_id`, `device_id`, `status`, counters (`files_*`, `verified_ok`, `verified_missing`, `bytes_uploaded`), `errors` | app-driven runs |
+| `upload_sessions` | `id`, `media_id`, `session_token`, `upload_url`, `total_chunks`, `uploaded_chunks`, `expires_at` | chunked uploads above 1 GB |
+
+`media_items` carries the backup state: `backup_status` (`none`, `pending`, `uploading`,
+`uploaded`, `failed`, `skipped`), `content_hash`/`hash_algo` (SHA-256 computed while streaming),
+`kdrive_file_id`, `kdrive_parent_id`, `backed_up_at`, `backup_error`, `backup_attempts`.
+`auto_backup` on `sources` is reserved for the background phase.
+
 ### `sources`
 
 Where media comes from.

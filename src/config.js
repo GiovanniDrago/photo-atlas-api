@@ -21,8 +21,15 @@ export const config = {
   supabaseJwksUrl: process.env.SUPABASE_JWKS_URL ?? '',
   emailConfirmRedirectUrl: process.env.EMAIL_CONFIRM_REDIRECT_URL ?? '',
   kdriveApiBase: process.env.KDRIVE_API_BASE ?? 'https://api.infomaniak.com',
+  kdriveMinIntervalMs: Number(process.env.KDRIVE_MIN_INTERVAL_MS ?? 1100),
   mediaUrlSecret: process.env.MEDIA_URL_SECRET ?? process.env.KDRIVE_ENC_KEY ?? 'photo-atlas-dev-secret',
   mediaCacheDir: process.env.MEDIA_CACHE_DIR ?? path.join(os.homedir(), '.cache', 'photo-atlas'),
   localMediaRoots: splitRoots(process.env.LOCAL_MEDIA_ROOTS),
+  kdriveBasePath: (process.env.KDRIVE_BASE_PATH ?? 'Media/PhotoAtlas')
+    .split('/')
+    .map((part) => part.trim())
+    .filter(Boolean),
+  uploadTmpDir: process.env.MEDIA_UPLOAD_TMP_DIR ?? path.join(os.homedir(), '.cache', 'photo-atlas', 'uploads'),
+  uploadMaxBytes: Number(process.env.UPLOAD_MAX_BYTES ?? 8 * 1024 * 1024 * 1024),
   maxBatchSize: 500,
 };
