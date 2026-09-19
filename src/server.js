@@ -9,6 +9,7 @@ import { registerJsonBodyParser } from './lib/json-body-parser.js';
 import { registerAuthHook } from './lib/supabase-auth.js';
 import healthRoutes from './routes/health.js';
 import authRoutes from './routes/auth.js';
+import confirmPageRoutes from './routes/confirm-page.js';
 import sourceRoutes from './routes/sources.js';
 import mediaRoutes from './routes/media.js';
 import clusterRoutes from './routes/clusters.js';
@@ -33,6 +34,7 @@ await app.register(rateLimit, {
 registerAuthHook(app);
 
 await app.register(healthRoutes);
+await app.register(confirmPageRoutes);
 await app.register(authRoutes);
 await app.register(sourceRoutes);
 await app.register(mediaRoutes);

@@ -60,16 +60,29 @@ bash scripts/build-netlify-page.sh          # dist/photo-atlas-confirm-email.zip
 # or download the artifact from GitHub Actions (workflow "Netlify page")
 ```
 
-1. Upload the zip on <https://app.netlify.com/drop> (drag & drop, no build).
-2. In Supabase: **Authentication → URL Configuration** → Site URL and Redirect URLs = the Netlify
-   page URL (for example `https://<site>.netlify.app/`).
-3. Put the same URL, with the app marker, in `.env`:
+1. Download the artifact `photo-atlas-confirm-email` from the **Netlify page** workflow (it
+   contains `index.html` and `_redirects` at the root) and drag it on
+   <https://app.netlify.com/drop> (or run `scripts/build-netlify-page.sh` locally).
+2. In Supabase: **Authentication → URL Configuration** → *Site URL* and *Redirect URLs*. This step
+   is mandatory: `redirect_to` values that are not allow-listed are silently replaced with the Site
+   URL (the default `http://localhost:3000`). Add both the Netlify page and, if you use it, the
+   fallback page served by the API itself:
+
+   ```
+   Site URL:      https://<site>.netlify.app
+   Redirect URLs: https://<site>.netlify.app/**
+                  http://<vm-ip>:8787/confirm-email
+   ```
+3. Put the URL the app must land on, with the app marker, in `.env`:
 
    ```
    EMAIL_CONFIRM_REDIRECT_URL=https://<site>.netlify.app/?app=PhotoAtlas
+   # or, without Netlify, the page served by the API on the LAN:
+   EMAIL_CONFIRM_REDIRECT_URL=http://<vm-ip>:8787/confirm-email?app=PhotoAtlas
    ```
 
-   `GET /api/config` returns it and the app passes it as `emailRedirectTo`.
+   `GET /api/config` returns it and the app passes it as `emailRedirectTo`; the API serves the same
+   page at `GET /confirm-email` so a confirmation link works on the LAN even without Netlify.
 4. **Authentication → Providers → Email**: *Confirm email* ON. **Authentication → Emails**: the
    default *Confirm signup* template is fine (`{{ .ConfirmationURL }}`).
 5. The built-in email service is rate limited and in practice only delivers to project team
