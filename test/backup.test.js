@@ -305,6 +305,37 @@ test('verify detects missing files and size mismatches', { skip }, async (t) => 
   assert.equal(rows[0].backup_error, 'missing_on_kdrive');
 });
 
+test('upload with an empty body leaves the item untouched', { skip }, async (t) => {
+  const { userId, token } = await createUser();
+  const sourceId = await createSource(userId);
+  const itemId = await createItem(sourceId);
+  const app = await buildApp();
+  t.after(async () => {
+    await app.close();
+    await cleanupUser(userId);
+  });
+
+  const response = await app.inject({
+    method: 'POST',
+    url: `/api/media/${itemId}/upload`,
+    headers: {
+      authorization: `Bearer ${token}`,
+      'content-type': 'application/octet-stream',
+    },
+    payload: Buffer.alloc(0),
+  });
+  assert.equal(response.statusCode, 400, response.body);
+  assert.equal(response.json().error, 'empty_body');
+
+  const { rows } = await pool.query(
+    'SELECT backup_status, backup_attempts, kdrive_file_id FROM media_items WHERE id = $1',
+    [itemId],
+  );
+  assert.equal(rows[0].backup_status, 'none');
+  assert.equal(rows[0].backup_attempts, 0);
+  assert.equal(rows[0].kdrive_file_id, null);
+});
+
 test('backup runs are created and patched', { skip }, async (t) => {
   const { userId, token } = await createUser();
   const app = await buildApp();

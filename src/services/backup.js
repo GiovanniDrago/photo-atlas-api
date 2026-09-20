@@ -33,7 +33,14 @@ export function sourceFolderParts(label) {
   return [...config.kdriveBasePath, sanitizeFolderName(label, 'Album')];
 }
 
-export async function streamToTempFile(readable) {
+export class UploadTooLargeError extends Error {
+  constructor(maxBytes) {
+    super(`upload exceeds the ${maxBytes} byte limit`);
+    this.name = 'UploadTooLargeError';
+  }
+}
+
+export async function streamToTempFile(readable, { maxBytes = config.uploadMaxBytes } = {}) {
   await fsp.mkdir(config.uploadTmpDir, { recursive: true });
   const filePath = path.join(config.uploadTmpDir, `upload-${crypto.randomUUID()}`);
   const hash = crypto.createHash('sha256');
@@ -41,11 +48,20 @@ export async function streamToTempFile(readable) {
   const meter = new Transform({
     transform(chunk, _encoding, callback) {
       size += chunk.length;
+      if (maxBytes > 0 && size > maxBytes) {
+        callback(new UploadTooLargeError(maxBytes));
+        return;
+      }
       hash.update(chunk);
       callback(null, chunk);
     },
   });
-  await pipeline(readable, meter, fs.createWriteStream(filePath));
+  try {
+    await pipeline(readable, meter, fs.createWriteStream(filePath));
+  } catch (error) {
+    await fsp.rm(filePath, { force: true }).catch(() => {});
+    throw error;
+  }
   return { filePath, size, sha256: hash.digest('hex') };
 }
 

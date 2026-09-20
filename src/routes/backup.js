@@ -2,6 +2,7 @@ import { query } from '../db.js';
 import { config } from '../config.js';
 import { getKDriveClient } from '../services/kdrive-account.js';
 import {
+  UploadTooLargeError,
   applyUploadedMetadata,
   extractMetadata,
   markMissingOnKDrive,
@@ -225,6 +226,10 @@ export default async function backupRoutes(app) {
     try {
       temp = await streamToTempFile(request.body);
       if (temp.size === 0) {
+        request.log.warn(
+          { mediaId: item.id, contentLength: request.headers['content-length'] ?? null },
+          'upload request with an empty body',
+        );
         return reply.code(400).send({ error: 'empty_body' });
       }
       const metadata = await extractMetadata(temp.filePath, item.mime);
@@ -250,6 +255,10 @@ export default async function backupRoutes(app) {
         bytes: temp.size,
       };
     } catch (error) {
+      if (error instanceof UploadTooLargeError) {
+        request.log.warn({ err: error.message, mediaId: item.id }, 'upload too large');
+        return reply.code(413).send({ error: 'upload_too_large', message: error.message });
+      }
       request.log.warn({ err: error.message }, 'kDrive upload failed');
       await markUploadFailed(item.id, error.message);
       return reply.code(502).send({ error: 'upload_failed', message: error.message });
