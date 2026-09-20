@@ -1,4 +1,5 @@
 import 'dotenv/config';
+import { config } from '../src/config.js';
 import { query } from '../src/db.js';
 import { getKDriveClient } from '../src/services/kdrive-account.js';
 
@@ -18,8 +19,8 @@ async function main() {
   const drive = await client.getDrive();
   console.log('drive ok:', drive?.data?.id ?? drive?.id ?? 'unknown');
 
-  const folder = await client.ensureFolderPath(['Media', 'PhotoAtlas', '_probe']);
-  console.log(`folder ready: ${folder.path} (id ${folder.id})`);
+  const folder = await client.ensureFolderPath(config.kdriveBasePath);
+  console.log(`base folder ready: ${folder.path} (id ${folder.id})`);
 
   const uploaded = await client.uploadFile({
     parentId: folder.id,

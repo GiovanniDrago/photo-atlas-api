@@ -3,6 +3,13 @@
 Photo Atlas talks to the Infomaniak kDrive REST API with a personal API token. The token is stored
 encrypted in the database and only used server-side, so the Flutter client never sees it.
 
+## Base folder
+
+Backups live under `KDRIVE_BASE_PATH` (default `Private/Media/PhotoAtlas`): per-folder backups in
+`<base>/<folder>`, manual uploads in `<base>/Manual`. kDrive does not allow creating folders at the
+drive root (`permission_denied`), so the base must start inside an existing writable space such as
+`Private`. The API creates the missing segments on the first upload.
+
 ## Getting a token
 
 1. Open <https://manager.infomaniak.com/v3/ng/accounts/token/list>.

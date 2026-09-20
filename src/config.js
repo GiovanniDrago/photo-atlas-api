@@ -25,7 +25,7 @@ export const config = {
   mediaUrlSecret: process.env.MEDIA_URL_SECRET ?? process.env.KDRIVE_ENC_KEY ?? 'photo-atlas-dev-secret',
   mediaCacheDir: process.env.MEDIA_CACHE_DIR ?? path.join(os.homedir(), '.cache', 'photo-atlas'),
   localMediaRoots: splitRoots(process.env.LOCAL_MEDIA_ROOTS),
-  kdriveBasePath: (process.env.KDRIVE_BASE_PATH ?? 'Media/PhotoAtlas')
+  kdriveBasePath: (process.env.KDRIVE_BASE_PATH ?? 'Private/Media/PhotoAtlas')
     .split('/')
     .map((part) => part.trim())
     .filter(Boolean),
