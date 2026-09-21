@@ -106,8 +106,8 @@ test('folder helpers sanitize names and build the base path', () => {
   assert.equal(sanitizeFolderName('...'), 'Album');
   assert.equal(sanitizeFolderName(''), 'Album');
   assert.equal(sanitizeFolderName('x'.repeat(200)).length, 80);
-  assert.deepEqual(manualFolderParts(), ['Media', 'PhotoAtlas', 'Manual']);
-  assert.deepEqual(sourceFolderParts('Camera'), ['Media', 'PhotoAtlas', 'Camera']);
+  assert.deepEqual(manualFolderParts(), [...config.kdriveBasePath, 'Manual']);
+  assert.deepEqual(sourceFolderParts('Camera'), [...config.kdriveBasePath, 'Camera']);
 });
 
 test('streamToTempFile computes size and sha256', async () => {
@@ -229,7 +229,10 @@ test('upload sends the file to kDrive and marks the item uploaded', { skip }, as
     [sourceId],
   );
   assert.ok(sourceRows[0].backup_folder_id);
-  assert.equal(sourceRows[0].backup_folder_path, 'Media/PhotoAtlas/Camera');
+  assert.equal(
+    sourceRows[0].backup_folder_path,
+    [...config.kdriveBasePath, 'Camera'].join('/'),
+  );
 });
 
 test('manual uploads go to Media/PhotoAtlas/Manual', { skip }, async (t) => {
@@ -258,16 +261,18 @@ test('manual uploads go to Media/PhotoAtlas/Manual', { skip }, async (t) => {
     [itemId],
   );
   const parentId = Number(rows[0].kdrive_parent_id);
-  const manual = fakeKDrive.state.folders
-    .get(1)
-    ?.find((folder) => folder.name === 'Media');
-  assert.ok(manual, 'Media folder created');
-  const photoAtlas = fakeKDrive.state.folders
-    .get(manual.id)
-    ?.find((folder) => folder.name === 'PhotoAtlas');
+  let folderId = 1;
+  for (const segment of config.kdriveBasePath) {
+    const folder = fakeKDrive.state.folders
+      .get(folderId)
+      ?.find((entry) => entry.name === segment);
+    assert.ok(folder, `${segment} folder created`);
+    folderId = folder.id;
+  }
   const manualFolder = fakeKDrive.state.folders
-    .get(photoAtlas.id)
+    .get(folderId)
     ?.find((folder) => folder.name === 'Manual');
+  assert.ok(manualFolder, 'Manual folder created');
   assert.equal(parentId, manualFolder.id);
 });
 
