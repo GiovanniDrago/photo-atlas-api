@@ -123,6 +123,10 @@ curl -X POST http://localhost:8787/api/sources \
   -d '{"kind":"local","label":"My pictures","root_path":"/home/droid/Pictures"}'
 ```
 
+`PATCH /api/sources/<id>` updates `label`, `root_path`, `last_scan_at`, `include_subfolders`,
+`device_id`, `album_key` and `auto_backup` (boolean). Enabling `auto_backup` sets
+`backup_enabled_at` once, disabling it clears the column.
+
 ## Media
 
 ### List and filter
@@ -221,7 +225,6 @@ curl "http://localhost:8787/api/backup/verify-queue?limit=100" -H "Authorization
 
 # per-source counters (uploaded / pending / failed, bytes)
 curl http://localhost:8787/api/backup/status -H "Authorization: Bearer <token>"
-
 # upload one original (?destination=manual puts it in Media/PhotoAtlas/Manual)
 curl -X POST "http://localhost:8787/api/media/<uuid>/upload?destination=manual" \
   -H "Authorization: Bearer <token>" -H 'Content-Type: application/octet-stream' \
@@ -241,6 +244,13 @@ Media payloads now include `backup_status`, `kdrive_file_id`, `backed_up_at` and
 `GET /api/media` accepts `backup_status=none,pending` and `device_id=`. The batch endpoint
 (`POST /api/media/batch`) also returns `items: [{id, external_key}]` so the app can upload right
 after indexing. kDrive-sourced items are marked `uploaded` automatically.
+
+`GET /api/backup/pending` **claims** the rows it returns: each item is atomically set to
+`backup_status='uploading'` (`FOR UPDATE SKIP LOCKED`), so a foreground run and the Android
+background worker never upload the same file twice (`conflict=rename` would create a duplicate on
+kDrive). A claim older than 2 hours (worker killed mid-upload) is released back to `pending` with
+`backup_error='stale_upload'` at the start of the next call; `GET /api/backup/status` counts
+`uploading` items as pending. A completed backup run also updates `sources.backup_last_run_at`.
 
 ## Clusters (planet map)
 

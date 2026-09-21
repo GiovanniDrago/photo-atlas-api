@@ -6,6 +6,7 @@ import { Readable } from 'node:stream';
 import Fastify from 'fastify';
 import pg from 'pg';
 import backupRoutes from '../src/routes/backup.js';
+import sourceRoutes from '../src/routes/sources.js';
 import { registerAuthHook } from '../src/lib/supabase-auth.js';
 import { registerOctetStreamParser } from '../src/lib/octet-stream-parser.js';
 import { encryptSecret } from '../src/lib/crypto.js';
@@ -47,6 +48,7 @@ async function buildApp() {
   registerOctetStreamParser(app);
   registerAuthHook(app);
   await app.register(backupRoutes);
+  await app.register(sourceRoutes);
   return app;
 }
 
@@ -364,4 +366,139 @@ test('backup runs are created and patched', { skip }, async (t) => {
   assert.equal(patched.json().run.status, 'completed');
   assert.equal(patched.json().run.verified_ok, 5);
   assert.ok(patched.json().run.finished_at);
+});
+
+test('pending queue claims items and releases stale uploads', { skip }, async (t) => {
+  const { userId, token } = await createUser();
+  const sourceId = await createSource(userId);
+  const freshId = await createItem(sourceId, { status: 'none' });
+  const staleId = await createItem(sourceId, { status: 'none' });
+  await pool.query(
+    `UPDATE media_items
+     SET backup_status = 'uploading', updated_at = now() - interval '3 hours'
+     WHERE id = $1`,
+    [staleId],
+  );
+  const app = await buildApp();
+  t.after(async () => {
+    await app.close();
+    await cleanupUser(userId);
+  });
+  const headers = { authorization: `Bearer ${token}` };
+
+  const first = await app.inject({ method: 'GET', url: '/api/backup/pending', headers });
+  assert.equal(first.statusCode, 200, first.body);
+  const claimed = first.json().items;
+  assert.equal(claimed.length, 2);
+  assert.ok(claimed.every((item) => item.backup_status === 'uploading'));
+  const staleItem = claimed.find((item) => item.id === staleId);
+  assert.equal(staleItem.backup_error, 'stale_upload');
+  assert.ok(claimed.some((item) => item.id === freshId));
+
+  const second = await app.inject({ method: 'GET', url: '/api/backup/pending', headers });
+  assert.equal(second.json().items.length, 0);
+
+  const status = await app.inject({ method: 'GET', url: '/api/backup/status', headers });
+  const entry = status.json().sources.find((source) => source.id === sourceId);
+  assert.equal(entry.pending, 2);
+  assert.equal(entry.uploaded, 0);
+});
+
+test('auto backup can be enabled per source', { skip }, async (t) => {
+  const { userId, token } = await createUser();
+  const app = await buildApp();
+  t.after(async () => {
+    await app.close();
+    await cleanupUser(userId);
+  });
+  const headers = { authorization: `Bearer ${token}` };
+
+  const created = await app.inject({
+    method: 'POST',
+    url: '/api/sources',
+    headers,
+    payload: { kind: 'local', label: 'Camera', root_path: 'album:1', auto_backup: true },
+  });
+  assert.equal(created.statusCode, 201, created.body);
+  const sourceId = created.json().source.id;
+  assert.equal(created.json().source.auto_backup, true);
+  assert.ok(created.json().source.backup_enabled_at);
+
+  const off = await app.inject({
+    method: 'PATCH',
+    url: `/api/sources/${sourceId}`,
+    headers,
+    payload: { auto_backup: false },
+  });
+  assert.equal(off.statusCode, 200, off.body);
+  assert.equal(off.json().source.auto_backup, false);
+  assert.equal(off.json().source.backup_enabled_at, null);
+
+  const on = await app.inject({
+    method: 'PATCH',
+    url: `/api/sources/${sourceId}`,
+    headers,
+    payload: { auto_backup: true },
+  });
+  assert.equal(on.json().source.auto_backup, true);
+  assert.ok(on.json().source.backup_enabled_at);
+
+  const renamed = await app.inject({
+    method: 'PATCH',
+    url: `/api/sources/${sourceId}`,
+    headers,
+    payload: { label: 'Camera 2' },
+  });
+  assert.equal(renamed.json().source.label, 'Camera 2');
+  assert.equal(renamed.json().source.auto_backup, true);
+});
+
+test('completed backup runs update the source last run time', { skip }, async (t) => {
+  const { userId, token } = await createUser();
+  const backupSourceId = await createSource(userId, { label: 'Camera' });
+  const verifySourceId = await createSource(userId, { label: 'Downloads' });
+  const app = await buildApp();
+  t.after(async () => {
+    await app.close();
+    await cleanupUser(userId);
+  });
+  const headers = { authorization: `Bearer ${token}` };
+
+  const backupRun = await app.inject({
+    method: 'POST',
+    url: '/api/backup/runs',
+    headers,
+    payload: { kind: 'backup', source_id: backupSourceId },
+  });
+  assert.equal(backupRun.statusCode, 201, backupRun.body);
+  const patched = await app.inject({
+    method: 'PATCH',
+    url: `/api/backup/runs/${backupRun.json().run.id}`,
+    headers,
+    payload: { status: 'completed', files_uploaded: 1 },
+  });
+  assert.equal(patched.statusCode, 200, patched.body);
+  const { rows } = await pool.query(
+    'SELECT backup_last_run_at FROM sources WHERE id = $1',
+    [backupSourceId],
+  );
+  assert.ok(rows[0].backup_last_run_at);
+
+  const verifyRun = await app.inject({
+    method: 'POST',
+    url: '/api/backup/runs',
+    headers,
+    payload: { kind: 'verify', source_id: verifySourceId },
+  });
+  await app.inject({
+    method: 'PATCH',
+    url: `/api/backup/runs/${verifyRun.json().run.id}`,
+    headers,
+    payload: { status: 'completed', verified_ok: 1 },
+  });
+  const { rows: verifyRows } = await pool.query(
+    'SELECT backup_last_run_at FROM sources WHERE id = $1',
+    [verifySourceId],
+  );
+  assert.equal(verifyRows[0].backup_last_run_at, null);
 });

@@ -41,7 +41,12 @@ cannot read anything while the API (table owner) works normally.
 `media_items` carries the backup state: `backup_status` (`none`, `pending`, `uploading`,
 `uploaded`, `failed`, `skipped`), `content_hash`/`hash_algo` (SHA-256 computed while streaming),
 `kdrive_file_id`, `kdrive_parent_id`, `backed_up_at`, `backup_error`, `backup_attempts`.
-`auto_backup` on `sources` is reserved for the background phase.
+`backup_status='uploading'` is a claim set by `GET /api/backup/pending` and released after 2 hours
+by the stale sweep.
+
+`sources.auto_backup` marks the folders included in the Android background backup;
+`backup_enabled_at` records when the toggle was switched on and `backup_last_run_at` is refreshed
+by the API when a backup run completes (never by verify runs).
 
 ### `sources`
 

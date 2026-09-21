@@ -23,13 +23,14 @@ export default async function sourceRoutes(app) {
       kdrive_folder_id: kdriveFolderId,
       device_id: deviceId,
       album_key: albumKey,
+      auto_backup: autoBackup,
     } = request.body ?? {};
     if (!kind || !label || !['local', 'kdrive'].includes(kind)) {
       return reply.code(400).send({ error: 'kind must be local or kdrive, label is required' });
     }
     const { rows } = await query(
-      `INSERT INTO sources (kind, label, root_path, kdrive_drive_id, kdrive_folder_id, device_id, album_key, owner_id)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+      `INSERT INTO sources (kind, label, root_path, kdrive_drive_id, kdrive_folder_id, device_id, album_key, owner_id, auto_backup, backup_enabled_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, CASE WHEN $9::boolean THEN now() END)
        RETURNING *`,
       [
         kind,
@@ -40,6 +41,7 @@ export default async function sourceRoutes(app) {
         deviceId ?? null,
         albumKey ?? null,
         request.user.id,
+        autoBackup === true,
       ],
     );
     return reply.code(201).send({ source: rows[0] });
@@ -53,8 +55,14 @@ export default async function sourceRoutes(app) {
          last_scan_at = COALESCE($4, last_scan_at),
          include_subfolders = COALESCE($5, include_subfolders),
          device_id = COALESCE($6, device_id),
-         album_key = COALESCE($7, album_key)
-       WHERE id = $1 AND owner_id = $8
+         album_key = COALESCE($7, album_key),
+         auto_backup = COALESCE($8::boolean, auto_backup),
+         backup_enabled_at = CASE
+           WHEN $8::boolean IS TRUE THEN COALESCE(backup_enabled_at, now())
+           WHEN $8::boolean IS FALSE THEN NULL
+           ELSE backup_enabled_at
+         END
+       WHERE id = $1 AND owner_id = $9
        RETURNING *`,
       [
         request.params.id,
@@ -66,6 +74,7 @@ export default async function sourceRoutes(app) {
           : null,
         request.body?.device_id ?? null,
         request.body?.album_key ?? null,
+        typeof request.body?.auto_backup === 'boolean' ? request.body.auto_backup : null,
         request.user.id,
       ],
     );

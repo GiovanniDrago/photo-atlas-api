@@ -62,7 +62,7 @@ export default async function backupRoutes(app) {
          s.backup_last_run_at,
          count(m.id)::int AS total,
          count(m.id) FILTER (WHERE m.backup_status = 'uploaded')::int AS uploaded,
-         count(m.id) FILTER (WHERE m.backup_status IN ('none', 'pending'))::int AS pending,
+         count(m.id) FILTER (WHERE m.backup_status IN ('none', 'pending', 'uploading'))::int AS pending,
          count(m.id) FILTER (WHERE m.backup_status = 'failed')::int AS failed,
          coalesce(sum(m.size_bytes) FILTER (WHERE m.backup_status = 'uploaded'), 0)::bigint AS bytes_uploaded,
          coalesce(sum(m.size_bytes), 0)::bigint AS bytes_total
@@ -100,18 +100,37 @@ export default async function backupRoutes(app) {
       sourceClause = `AND m.source_id = $${params.length}`;
     }
     params.push(limit);
+    await query(
+      `UPDATE media_items m
+       SET backup_status = 'pending', backup_error = 'stale_upload', updated_at = now()
+       FROM sources s
+       WHERE m.source_id = s.id
+         AND s.owner_id = $1
+         AND m.backup_status = 'uploading'
+         AND m.updated_at < now() - interval '2 hours'`,
+      [request.user.id],
+    );
     const { rows } = await query(
-      `SELECT m.id, m.source_id, m.external_key, m.path, m.name, m.mime, m.media_type,
-              m.size_bytes, m.backup_status, m.backup_attempts, m.backup_error,
-              s.label AS source_label
-       FROM media_items m
-       JOIN sources s ON s.id = m.source_id
-       WHERE s.owner_id = $1
-         AND s.kind = 'local'
-         AND m.backup_status IN ('none', 'pending', 'failed')
-         ${sourceClause}
-       ORDER BY m.backup_attempts ASC, m.taken_at DESC NULLS LAST, m.indexed_at DESC
-       LIMIT $${params.length}`,
+      `WITH candidates AS (
+         SELECT m.id, m.source_id
+         FROM media_items m
+         JOIN sources s ON s.id = m.source_id
+         WHERE s.owner_id = $1
+           AND s.kind = 'local'
+           AND m.backup_status IN ('none', 'pending', 'failed')
+           ${sourceClause}
+         ORDER BY m.backup_attempts ASC, m.taken_at DESC NULLS LAST, m.indexed_at DESC
+         LIMIT $${params.length}
+         FOR UPDATE OF m SKIP LOCKED
+       )
+       UPDATE media_items m
+       SET backup_status = 'uploading', updated_at = now()
+       FROM candidates c
+       JOIN sources s ON s.id = c.source_id
+       WHERE m.id = c.id
+       RETURNING m.id, m.source_id, m.external_key, m.path, m.name, m.mime, m.media_type,
+                 m.size_bytes, m.backup_status, m.backup_attempts, m.backup_error,
+                 s.label AS source_label`,
       params,
     );
     return { items: rows };
@@ -202,7 +221,15 @@ export default async function backupRoutes(app) {
       ],
     );
     if (rows.length === 0) return reply.code(404).send({ error: 'not_found' });
-    return { run: rows[0] };
+    const run = rows[0];
+    if (run.kind === 'backup' && ['completed', 'failed', 'cancelled'].includes(run.status)) {
+      await query(
+        `UPDATE sources SET backup_last_run_at = now()
+         WHERE owner_id = $1 AND kind = 'local' AND ($2::uuid IS NULL OR id = $2::uuid)`,
+        [request.user.id, run.source_id],
+      );
+    }
+    return { run };
   });
 
   app.get('/api/backup/runs', async (request) => {
