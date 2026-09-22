@@ -334,3 +334,44 @@ test('media list reports the full total past the last page', { skip }, async () 
     await cleanupUser(userId);
   }
 });
+
+test('media list pages are stable when dates are equal', { skip }, async () => {
+  const app = await buildApp();
+  const { userId, token } = await createUser();
+  try {
+    const sourceId = await createSource(userId);
+    const params = [sourceId];
+    const values = [];
+    for (let index = 0; index < 6; index += 1) {
+      params.push(`asset:tie-${index}`);
+      values.push(
+        `($1, $${params.length}, 'IMG_${index}.jpg', 'image/jpeg', 'image', 10, 'none', '2026-01-01T00:00:00Z')`,
+      );
+    }
+    // A single statement: taken_at and indexed_at are identical for all rows.
+    await pool.query(
+      `INSERT INTO media_items (source_id, external_key, name, mime, media_type, size_bytes, backup_status, taken_at)
+       VALUES ${values.join(',')}`,
+      params,
+    );
+
+    const ids = [];
+    for (let offset = 0; offset < 6; offset += 2) {
+      const response = await app.inject({
+        method: 'GET',
+        url: `/api/media?limit=2&offset=${offset}`,
+        headers: { authorization: `Bearer ${token}` },
+      });
+      assert.equal(response.statusCode, 200);
+      const body = response.json();
+      assert.equal(body.total, 6);
+      assert.equal(body.items.length, 2);
+      ids.push(...body.items.map((item) => item.id));
+    }
+    assert.equal(ids.length, 6);
+    assert.equal(new Set(ids).size, 6, 'each page must return distinct items');
+  } finally {
+    await app.close();
+    await cleanupUser(userId);
+  }
+});

@@ -85,10 +85,12 @@ export default async function mediaRoutes(app) {
 
     const limit = clamp(Number(q.limit ?? 100), 1, config.maxBatchSize);
     const offset = Math.max(Number(q.offset ?? 0), 0);
+    // The id tiebreaker keeps offset pagination stable when dates are equal
+    // (bulk inserts share indexed_at and photos can share taken_at).
     const order =
       q.order === 'taken_at.asc'
-        ? 'm.taken_at ASC NULLS LAST, m.indexed_at ASC'
-        : 'm.taken_at DESC NULLS LAST, m.indexed_at DESC';
+        ? 'm.taken_at ASC NULLS LAST, m.indexed_at ASC, m.id ASC'
+        : 'm.taken_at DESC NULLS LAST, m.indexed_at DESC, m.id DESC';
 
     const where = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
     const from = `FROM media_items m JOIN sources s ON s.id = m.source_id ${where}`;
