@@ -91,19 +91,25 @@ export default async function mediaRoutes(app) {
         : 'm.taken_at DESC NULLS LAST, m.indexed_at DESC';
 
     const where = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
+    const from = `FROM media_items m JOIN sources s ON s.id = m.source_id ${where}`;
+    const filterParams = [...params];
+    const limitParam = push(limit);
+    const offsetParam = push(offset);
     const { rows } = await query(
-      `SELECT ${BASE_FIELDS}, count(*) OVER() AS total
-       FROM media_items m
-       JOIN sources s ON s.id = m.source_id
-       ${where}
+      `SELECT ${BASE_FIELDS}
+       ${from}
        ORDER BY ${order}
-       LIMIT ${push(limit)} OFFSET ${push(offset)}`,
+       LIMIT ${limitParam} OFFSET ${offsetParam}`,
       params,
+    );
+    const { rows: countRows } = await query(
+      `SELECT count(*)::int AS total ${from}`,
+      filterParams,
     );
 
     return {
       items: rows.map((row) => serialize(row, request)),
-      total: rows.length > 0 ? Number(rows[0].total) : 0,
+      total: Number(countRows[0]?.total ?? 0),
       limit,
       offset,
     };
@@ -245,5 +251,96 @@ export default async function mediaRoutes(app) {
     }
 
     return reply.code(404).send({ error: 'file_unavailable' });
+  });
+
+  app.post('/api/media/delete', async (request, reply) => {
+    const body = request.body ?? {};
+    const ids = Array.isArray(body.ids) ? body.ids.filter(isUuid) : [];
+    if (ids.length === 0) return reply.code(400).send({ error: 'no_ids' });
+    if (ids.length > config.maxBatchSize) {
+      return reply.code(400).send({ error: 'too_many_ids' });
+    }
+    const removeCloud = body.cloud !== false;
+    const removeIndex = body.index === true;
+
+    const { rows } = await query(
+      `SELECT m.id, m.name, m.external_key, m.thumb_path, m.kdrive_file_id,
+              s.kind AS source_kind
+       FROM media_items m
+       JOIN sources s ON s.id = m.source_id
+       WHERE m.id = ANY($1::uuid[]) AND s.owner_id = $2`,
+      [ids, request.user.id],
+    );
+    if (rows.length === 0) {
+      return { deleted: 0, cloud_deleted: 0, reset: 0, failed: [], items: [] };
+    }
+
+    const needsKDrive = rows.some(
+      (row) => removeCloud && (row.kdrive_file_id != null || row.source_kind === 'kdrive'),
+    );
+    let client = null;
+    let kdriveError = null;
+    if (needsKDrive) {
+      try {
+        ({ client } = await getKDriveClient(request.user.id));
+      } catch (error) {
+        kdriveError = error.message;
+      }
+    }
+
+    const failed = [];
+    const items = [];
+    let deleted = 0;
+    let cloudDeleted = 0;
+    let reset = 0;
+
+    for (const row of rows) {
+      const kdriveId =
+        row.kdrive_file_id ?? (row.source_kind === 'kdrive' ? row.external_key : null);
+      let cloudOk = false;
+      if (removeCloud && kdriveId != null) {
+        if (!client) {
+          const message = kdriveError ?? 'kdrive_unavailable';
+          failed.push({ id: row.id, error: message });
+          items.push({ id: row.id, action: 'failed', error: message });
+          continue;
+        }
+        try {
+          await client.deleteFile(kdriveId);
+          cloudOk = true;
+          cloudDeleted += 1;
+        } catch (error) {
+          failed.push({ id: row.id, error: error.message });
+          items.push({ id: row.id, action: 'failed', error: error.message });
+          continue;
+        }
+      }
+
+      // kDrive-sourced rows have no local copy: without their file they are stale.
+      const dropRow = removeIndex || (cloudOk && row.source_kind === 'kdrive');
+      if (dropRow) {
+        await query('DELETE FROM media_items WHERE id = $1', [row.id]);
+        if (row.thumb_path) {
+          await fs.promises.unlink(row.thumb_path).catch(() => {});
+        }
+        deleted += 1;
+        items.push({ id: row.id, action: 'deleted' });
+      } else if (cloudOk) {
+        await query(
+          `UPDATE media_items
+           SET backup_status = 'none', kdrive_file_id = NULL, kdrive_parent_id = NULL,
+               backed_up_at = NULL, backup_error = NULL, backup_attempts = 0,
+               updated_at = now()
+           WHERE id = $1`,
+          [row.id],
+        );
+        reset += 1;
+        items.push({ id: row.id, action: 'reset' });
+      } else {
+        items.push({ id: row.id, action: 'unchanged' });
+      }
+    }
+
+    return { deleted, cloud_deleted: cloudDeleted, reset, failed, items };
   });
 }

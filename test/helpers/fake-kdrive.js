@@ -7,6 +7,7 @@ export async function startFakeKDrive() {
     files: new Map(),
     uploads: [],
     sessions: [],
+    deleted: [],
     nextId: 1000,
   };
 
@@ -110,6 +111,18 @@ export async function startFakeKDrive() {
       return file
         ? send(200, { data: file })
         : send(404, { result: 'error', error: { description: 'File not found' } });
+    }
+
+    match = path.match(/^\/2\/drive\/(\d+)\/files\/(\d+)$/);
+    if (match && request.method === 'DELETE') {
+      const fileId = Number(match[2]);
+      const file = state.files.get(fileId);
+      if (!file) {
+        return send(404, { result: 'error', error: { description: 'File not found' } });
+      }
+      state.files.delete(fileId);
+      state.deleted.push(fileId);
+      return send(200, { data: { id: fileId, result: 'success' } });
     }
 
     return send(404, { result: 'error', error: { description: `no route ${request.method} ${path}` } });
