@@ -176,6 +176,31 @@ export default async function mediaRoutes(app) {
     if (rows.length === 0) return reply.code(404).send({ error: 'not_found' });
     const item = rows[0];
 
+    // Large on-the-fly preview for the full screen viewer: kDrive is asked for
+    // the requested width and nothing is cached on disk.
+    const requestedWidth = Math.round(Number(request.query?.w ?? 0));
+    if (
+      Number.isFinite(requestedWidth) &&
+      requestedWidth > 320 &&
+      item.source_kind === 'kdrive' &&
+      item.external_key
+    ) {
+      const width = clamp(requestedWidth, 321, 2048);
+      try {
+        const { client } = await getKDriveClient(item.owner_id);
+        const response = await client.fetchThumbnail(item.external_key, width);
+        if (!response.ok) throw new Error(`kDrive thumbnail failed (${response.status})`);
+        const buffer = Buffer.from(await response.arrayBuffer());
+        if (buffer.length > 0) {
+          reply.header('Content-Type', 'image/jpeg');
+          reply.header('Cache-Control', 'private, max-age=3600');
+          return reply.send(buffer);
+        }
+      } catch (error) {
+        request.log.warn({ err: error.message }, 'kdrive preview failed');
+      }
+    }
+
     const cached = await ensureThumbnail(item).catch((error) => {
       request.log.warn({ err: error.message }, 'thumbnail cache failed');
       return null;

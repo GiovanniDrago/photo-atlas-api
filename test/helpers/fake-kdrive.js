@@ -1,6 +1,11 @@
 import http from 'node:http';
 import { config } from '../../src/config.js';
 
+const JPEG_1X1 = Buffer.from(
+  '/9j/4AAQSkZJRgABAQEAYABgAAD/2wBDAAgGBgcGBQgHBwcJCQgKDBQNDAsLDBkSEw8UHRofHh0aHBwgJC4nICIsIxwcKDcpLDAxNDQ0Hyc5PTgyPC4zNDL/wAALCAABAAEBAREA/8QAFAABAAAAAAAAAAAAAAAAAAAACf/EABQQAQAAAAAAAAAAAAAAAAAAAAD/2gAIAQEAAD8AKp//2Q==',
+  'base64',
+);
+
 export async function startFakeKDrive() {
   const state = {
     folders: new Map(),
@@ -8,6 +13,7 @@ export async function startFakeKDrive() {
     uploads: [],
     sessions: [],
     deleted: [],
+    thumbnails: [],
     nextId: 1000,
   };
 
@@ -111,6 +117,19 @@ export async function startFakeKDrive() {
       return file
         ? send(200, { data: file })
         : send(404, { result: 'error', error: { description: 'File not found' } });
+    }
+
+    match = path.match(/^\/2\/drive\/(\d+)\/files\/(\d+)\/thumbnail$/);
+    if (match && request.method === 'GET') {
+      const fileId = Number(match[2]);
+      const width = Number(url.searchParams.get('width') ?? 0);
+      state.thumbnails.push({ fileId, width });
+      if (!state.files.has(fileId)) {
+        return send(404, { result: 'error', error: { description: 'File not found' } });
+      }
+      response.writeHead(200, { 'Content-Type': 'image/jpeg' });
+      response.end(JPEG_1X1);
+      return;
     }
 
     match = path.match(/^\/2\/drive\/(\d+)\/files\/(\d+)$/);
