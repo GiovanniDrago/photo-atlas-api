@@ -136,6 +136,28 @@ export default async function backupRoutes(app) {
     return { items: rows };
   });
 
+  // Releases claims taken by an interrupted run (uploading -> pending) so the
+  // next run can retry them immediately instead of waiting for the 2h sweep.
+  app.post('/api/backup/release', async (request, reply) => {
+    const body = request.body ?? {};
+    const ids = Array.isArray(body.ids) ? body.ids.filter(isUuid) : [];
+    if (ids.length === 0) return reply.code(400).send({ error: 'no_ids' });
+    if (ids.length > config.maxBatchSize) {
+      return reply.code(400).send({ error: 'too_many_ids' });
+    }
+    const result = await query(
+      `UPDATE media_items m
+       SET backup_status = 'pending', backup_error = NULL, updated_at = now()
+       FROM sources s
+       WHERE m.source_id = s.id
+         AND s.owner_id = $2
+         AND m.id = ANY($1::uuid[])
+         AND m.backup_status = 'uploading'`,
+      [ids, request.user.id],
+    );
+    return { released: result.rowCount ?? 0 };
+  });
+
   app.get('/api/backup/verify-queue', async (request, reply) => {
     const sourceId = request.query?.source_id;
     if (sourceId != null && !isUuid(sourceId)) {

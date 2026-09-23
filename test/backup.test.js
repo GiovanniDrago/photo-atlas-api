@@ -507,3 +507,71 @@ test('completed backup runs update the source last run time', { skip }, async (t
   );
   assert.equal(verifyRows[0].backup_last_run_at, null);
 });
+
+test('backup release returns interrupted claims to pending', { skip }, async () => {
+  const app = await buildApp();
+  const { userId, token } = await createUser();
+  try {
+    const sourceId = await createSource(userId);
+    const uploading = await createItem(sourceId, { status: 'uploading' });
+    const pending = await createItem(sourceId, { status: 'pending' });
+    const uploaded = await createItem(sourceId, { status: 'uploaded' });
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/backup/release',
+      headers: { authorization: `Bearer ${token}` },
+      payload: { ids: [uploading, pending, uploaded] },
+    });
+    assert.equal(response.statusCode, 200);
+    assert.equal(response.json().released, 1);
+
+    const { rows } = await pool.query(
+      'SELECT id, backup_status FROM media_items WHERE id = ANY($1::uuid[]) ORDER BY id',
+      [[uploading, pending, uploaded]],
+    );
+    const byId = new Map(rows.map((row) => [row.id, row.backup_status]));
+    assert.equal(byId.get(uploading), 'pending');
+    assert.equal(byId.get(pending), 'pending');
+    assert.equal(byId.get(uploaded), 'uploaded');
+  } finally {
+    await app.close();
+    await cleanupUser(userId);
+  }
+});
+
+test('backup release ignores other users and empty id lists', { skip }, async () => {
+  const app = await buildApp();
+  const owner = await createUser();
+  const stranger = await createUser();
+  try {
+    const sourceId = await createSource(owner.userId);
+    const item = await createItem(sourceId, { status: 'uploading' });
+
+    const foreign = await app.inject({
+      method: 'POST',
+      url: '/api/backup/release',
+      headers: { authorization: `Bearer ${stranger.token}` },
+      payload: { ids: [item] },
+    });
+    assert.equal(foreign.statusCode, 200);
+    assert.equal(foreign.json().released, 0);
+    const { rows } = await pool.query(
+      'SELECT backup_status FROM media_items WHERE id = $1',
+      [item],
+    );
+    assert.equal(rows[0].backup_status, 'uploading');
+
+    const empty = await app.inject({
+      method: 'POST',
+      url: '/api/backup/release',
+      headers: { authorization: `Bearer ${owner.token}` },
+      payload: { ids: [] },
+    });
+    assert.equal(empty.statusCode, 400);
+  } finally {
+    await app.close();
+    await cleanupUser(owner.userId);
+    await cleanupUser(stranger.userId);
+  }
+});
