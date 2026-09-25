@@ -68,6 +68,7 @@ async function createItem(
     backedUpAt = null,
     lat = null,
     lon = null,
+    status = null,
   } = {},
 ) {
   const { rows } = await pool.query(
@@ -81,7 +82,7 @@ async function createItem(
       name,
       mediaType === 'video' ? 'video/mp4' : 'image/jpeg',
       mediaType,
-      backedUpAt == null ? 'pending' : 'uploaded',
+      status ?? (backedUpAt == null ? 'pending' : 'uploaded'),
       takenAt,
       backedUpAt,
       lat,
@@ -321,6 +322,71 @@ test('smart albums resolve date, upload date, type and radius rules', { skip }, 
   });
   assert.equal(editRules.statusCode, 200, JSON.stringify(editRules.json()));
   assert.equal(editRules.json().album.item_count, 1);
+});
+
+test('album media can be filtered by backup status', { skip }, async (t) => {
+  const app = await buildApp();
+  const { userId, token } = await createUser();
+  t.after(async () => {
+    await cleanupUser(userId);
+    await app.close();
+  });
+  const sourceId = await createSource(userId);
+  const uploadedId = await createItem(sourceId, {
+    name: 'uploaded.jpg',
+    backedUpAt: '2025-01-01T00:00:00Z',
+  });
+  const pendingId = await createItem(sourceId, { name: 'pending.jpg' });
+  const failedId = await createItem(sourceId, { name: 'failed.jpg', status: 'failed' });
+
+  const created = await app.inject({
+    method: 'POST',
+    url: '/api/albums',
+    headers: auth(token),
+    payload: { name: 'Backup', media_ids: [uploadedId, pendingId, failedId] },
+  });
+  const albumId = created.json().album.id;
+  assert.equal(created.json().album.item_count, 3);
+
+  const failed = await app.inject({
+    method: 'GET',
+    url: `/api/albums/${albumId}/media?backup_status=failed`,
+    headers: auth(token),
+  });
+  assert.equal(failed.json().total, 1);
+  assert.equal(failed.json().items[0].name, 'failed.jpg');
+
+  const notLoaded = await app.inject({
+    method: 'GET',
+    url: `/api/albums/${albumId}/media?backup_status=none,pending,failed`,
+    headers: auth(token),
+  });
+  assert.equal(notLoaded.json().total, 2);
+
+  const ignored = await app.inject({
+    method: 'GET',
+    url: `/api/albums/${albumId}/media?backup_status=bogus`,
+    headers: auth(token),
+  });
+  assert.equal(ignored.json().total, 3);
+
+  const smart = await app.inject({
+    method: 'POST',
+    url: '/api/albums',
+    headers: auth(token),
+    payload: {
+      name: 'Falliti',
+      kind: 'smart',
+      rules: { all: [{ field: 'backup_status', op: 'eq', value: 'failed' }] },
+    },
+  });
+  assert.equal(smart.json().album.item_count, 1);
+  const smartMedia = await app.inject({
+    method: 'GET',
+    url: `/api/albums/${smart.json().album.id}/media?backup_status=failed`,
+    headers: auth(token),
+  });
+  assert.equal(smartMedia.json().total, 1);
 });
 
 test('albums are isolated between users', { skip }, async (t) => {

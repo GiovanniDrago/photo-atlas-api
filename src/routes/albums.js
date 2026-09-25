@@ -46,9 +46,21 @@ async function ownedAlbum(userId, albumId) {
   return rows[0] ?? null;
 }
 
+const BACKUP_STATUSES = ['none', 'pending', 'uploading', 'uploaded', 'failed', 'skipped'];
+
+function parseBackupStatuses(value) {
+  if (value == null) return null;
+  const statuses = String(value)
+    .split(',')
+    .map((status) => status.trim())
+    .filter((status) => BACKUP_STATUSES.includes(status));
+  return statuses.length > 0 ? statuses : null;
+}
+
 /// WHERE + params selecting the media of an album (manual membership or smart
-/// rules), always scoped to the owner.
-function albumMediaScope(album, userId) {
+/// rules), always scoped to the owner. [backupStatus] adds the same filter as
+/// /api/media, used by the "retry failed uploads" action.
+function albumMediaScope(album, userId, backupStatus) {
   const params = [];
   const push = (value) => {
     params.push(value);
@@ -61,6 +73,9 @@ function albumMediaScope(album, userId) {
     conditions.push(
       `m.id IN (SELECT media_id FROM album_items WHERE album_id = ${push(album.id)})`,
     );
+  }
+  if (backupStatus != null) {
+    conditions.push(`m.backup_status = ANY(${push(backupStatus)}::text[])`);
   }
   conditions.push(`s.owner_id = ${push(userId)}`);
   return { where: `WHERE ${conditions.join(' AND ')}`, params };
@@ -269,7 +284,8 @@ export default async function albumRoutes(app) {
 
     const limit = clamp(Number(request.query?.limit ?? 100), 1, config.maxBatchSize);
     const offset = Math.max(Number(request.query?.offset ?? 0), 0);
-    const { where, params } = albumMediaScope(album, request.user.id);
+    const backupStatus = parseBackupStatuses(request.query?.backup_status);
+    const { where, params } = albumMediaScope(album, request.user.id, backupStatus);
     const limitParam = params.length + 1;
     const offsetParam = params.length + 2;
     const { rows } = await query(
