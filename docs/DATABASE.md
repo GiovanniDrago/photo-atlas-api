@@ -99,6 +99,18 @@ Progress records for client-driven and kDrive scans: status, file counters and a
 Single-row connection store: drive id plus the AES-256-GCM encrypted token (`token_cipher`,
 `token_iv`, `token_tag`).
 
+### `albums`
+
+User albums, always database relations (never kDrive folders). `kind` is `manual` or `smart`;
+`rules` holds the JSON rule tree of smart albums (see [API.md](API.md#albums)) and is `{}` for
+manual ones; `cover_media_id` is an optional explicit cover (the newest matching item is used
+otherwise). `owner_id` cascades from `auth.users`.
+
+### `album_items`
+
+Manual membership: `(album_id, media_id)` primary key with `added_at`, both foreign keys cascade.
+Removing a row never deletes the file.
+
 ## Aggregation functions
 
 ### `media_cell_size(zoom)`

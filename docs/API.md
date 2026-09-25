@@ -204,6 +204,60 @@ none = `none`). Maximum 500 items per request.
 (≤ 256 KB) per asset because the API cannot read files that only exist on the phone. Invalid or
 oversized payloads are ignored and the item is still indexed.
 
+## Albums
+
+Albums are database relations: a media item can belong to many albums and removing it from an
+album never touches the file. `kind=manual` albums list their items in `album_items`; `kind=smart`
+albums resolve live from a rule tree, so new matching media appear automatically.
+
+```bash
+# list (item_count and a serialized cover are computed live)
+curl http://localhost:8787/api/albums -H "Authorization: Bearer <token>"
+# create a manual album from the current selection
+curl -X POST http://localhost:8787/api/albums -H "Authorization: Bearer <token>" \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"Viaggio","media_ids":["<uuid>","<uuid>"]}'
+# create a smart album
+curl -X POST http://localhost:8787/api/albums -H "Authorization: Bearer <token>" \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"Qui nel 2024","kind":"smart","rules":{"all":[
+        {"field":"taken_at","op":"between","value":["2024-01-01","2024-12-31"]},
+        {"field":"location","op":"within","value":{"lat":45.07,"lon":7.68,"radius_m":5000}}]}}'
+# count preview for the builder
+curl -X POST http://localhost:8787/api/albums/preview -H "Authorization: Bearer <token>" \
+  -H 'Content-Type: application/json' -d '{"rules":{"all":[{"field":"media_type","op":"eq","value":"video"}]}}'
+# rename, change rules or cover (clear_cover drops the explicit cover)
+curl -X PATCH http://localhost:8787/api/albums/<uuid> -H "Authorization: Bearer <token>" \
+  -H 'Content-Type: application/json' -d '{"name":"Estate","cover_media_id":"<uuid>"}'
+# items of an album, same {items,total,limit,offset} shape as /api/media
+curl "http://localhost:8787/api/albums/<uuid>/media?limit=100&offset=0" -H "Authorization: Bearer <token>"
+# add or remove manual items
+curl -X POST http://localhost:8787/api/albums/<uuid>/items -H "Authorization: Bearer <token>" \
+  -H 'Content-Type: application/json' -d '{"media_ids":["<uuid>"]}'
+curl -X DELETE http://localhost:8787/api/albums/<uuid>/items -H "Authorization: Bearer <token>" \
+  -H 'Content-Type: application/json' -d '{"media_ids":["<uuid>"]}'
+# delete the album (items and files are untouched)
+curl -X DELETE http://localhost:8787/api/albums/<uuid> -H "Authorization: Bearer <token>"
+```
+
+Rules use one top-level group, `all` (AND) or `any` (OR), with up to 20 leaf conditions
+`{field, op, value}`:
+
+| Field | Ops | Value |
+|---|---|---|
+| `taken_at`, `backed_up_at` | `between`, `gte`, `lte`, `is_null` | ISO date (or a two-date array for `between`) |
+| `location` | `within` | `{lat, lon, radius_m}`, radius 100 m – 500 km, PostGIS `ST_DWithin` |
+| `media_type` | `eq` | `image` or `video` |
+| `metadata_status` | `eq` | `none`, `partial`, `full` |
+| `backup_status` | `eq`, `in` | `none`, `pending`, `uploading`, `uploaded`, `failed`, `skipped` |
+| `source_id`, `device_id` | `eq` | uuid |
+| `name` | `contains` | substring, `%` and `_` are escaped |
+
+The engine supports all of them; the app builder currently exposes taken/upload date, location and
+media type. Unknown fields/ops, out-of-range values or empty rules are rejected with `400`.
+`POST /api/albums/:id/items` and `DELETE /api/albums/:id/items` only work on manual albums
+(`400 album_is_smart`); media that is not yours is skipped or refused.
+
 ## Backup to kDrive
 
 Originals are uploaded to `KDRIVE_BASE_PATH` (default `Media/PhotoAtlas`): per-folder backups land

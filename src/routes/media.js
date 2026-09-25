@@ -1,20 +1,16 @@
 import fs from 'node:fs';
 import { query } from '../db.js';
 import { config } from '../config.js';
-import { withAssetUrls, verifyAssetSignature } from '../lib/signed-url.js';
+import { verifyAssetSignature } from '../lib/signed-url.js';
+import {
+  MEDIA_BASE_FIELDS,
+  MEDIA_JOIN,
+  serializeMediaRow,
+} from '../lib/media-row.js';
 import { isAllowedLocalPath } from '../lib/local-paths.js';
 import { ensureThumbnail } from '../services/media-assets.js';
 import { getKDriveClient } from '../services/kdrive-account.js';
 import { upsertMediaItems, updateScanRun } from '../services/media-index.js';
-
-const BASE_FIELDS = `
-  m.id, m.source_id, m.external_key, m.path, m.name, m.mime, m.media_type,
-  m.size_bytes, m.taken_at, m.file_created_at, m.modified_at, m.lat, m.lon,
-  (m.lat IS NOT NULL AND m.lon IS NOT NULL) AS has_gps,
-  m.metadata_status, m.width, m.height, m.duration_s, m.indexed_at, m.updated_at,
-  m.backup_status, m.kdrive_file_id, m.backed_up_at, m.backup_error,
-  s.kind AS source_kind, s.label AS source_label
-`;
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -24,14 +20,6 @@ function isUuid(value) {
 
 function clamp(value, min, max) {
   return Math.min(Math.max(value, min), max);
-}
-
-function baseUrlOf(request) {
-  return `${request.protocol}://${request.headers.host}`;
-}
-
-function serialize(row, request) {
-  return withAssetUrls(row, baseUrlOf(request));
 }
 
 function streamFile(reply, filePath, mime, cacheSeconds = 604800) {
@@ -93,12 +81,12 @@ export default async function mediaRoutes(app) {
         : 'm.taken_at DESC NULLS LAST, m.indexed_at DESC, m.id DESC';
 
     const where = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
-    const from = `FROM media_items m JOIN sources s ON s.id = m.source_id ${where}`;
+    const from = `${MEDIA_JOIN} ${where}`;
     const filterParams = [...params];
     const limitParam = push(limit);
     const offsetParam = push(offset);
     const { rows } = await query(
-      `SELECT ${BASE_FIELDS}
+      `SELECT ${MEDIA_BASE_FIELDS}
        ${from}
        ORDER BY ${order}
        LIMIT ${limitParam} OFFSET ${offsetParam}`,
@@ -110,7 +98,7 @@ export default async function mediaRoutes(app) {
     );
 
     return {
-      items: rows.map((row) => serialize(row, request)),
+      items: rows.map((row) => serializeMediaRow(row, request)),
       total: Number(countRows[0]?.total ?? 0),
       limit,
       offset,
@@ -151,14 +139,13 @@ export default async function mediaRoutes(app) {
   app.get('/api/media/:id', async (request, reply) => {
     if (!isUuid(request.params.id)) return reply.code(400).send({ error: 'invalid id' });
     const { rows } = await query(
-      `SELECT ${BASE_FIELDS}
-       FROM media_items m
-       JOIN sources s ON s.id = m.source_id
+      `SELECT ${MEDIA_BASE_FIELDS}
+       ${MEDIA_JOIN}
        WHERE m.id = $1 AND s.owner_id = $2`,
       [request.params.id, request.user.id],
     );
     if (rows.length === 0) return reply.code(404).send({ error: 'not_found' });
-    return { item: serialize(rows[0], request) };
+    return { item: serializeMediaRow(rows[0], request) };
   });
 
   app.get('/api/media/:id/thumbnail', async (request, reply) => {
