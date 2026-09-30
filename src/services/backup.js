@@ -9,9 +9,41 @@ import { config } from '../config.js';
 import { query } from '../db.js';
 import { getKDriveClient } from './kdrive-account.js';
 import { computeMetadataStatus } from './enrich.js';
+import { isRetryableUploadError } from './kdrive.js';
 
-export const DIRECT_UPLOAD_LIMIT = 1024 * 1024 * 1024;
-export const CHUNK_SIZE = 1024 * 1024 * 1024;
+/** Files up to this size go in one request; bigger ones use a chunk session. */
+function directUploadLimit() {
+  return Math.max(0, config.directUploadLimitBytes);
+}
+
+/** Chunk size for session uploads (kDrive allows up to 1 GB per chunk). */
+function uploadChunkSize() {
+  return Math.min(Math.max(1, config.uploadChunkSizeBytes), 1024 * 1024 * 1024);
+}
+
+/** Transient network failures are retried; kDrive 4xx are not. */
+const UPLOAD_RETRY_ATTEMPTS = 3;
+const UPLOAD_RETRY_BASE_DELAY_MS = 750;
+
+/**
+ * Runs [attempt] again on retryable upload failures (socket resets, timeouts,
+ * 429/5xx from kDrive) with exponential backoff. The caller must recreate the
+ * body stream on every call: a failed fetch consumes it.
+ */
+async function withUploadRetry(attempt) {
+  let lastError;
+  for (let tryIndex = 1; tryIndex <= UPLOAD_RETRY_ATTEMPTS; tryIndex += 1) {
+    try {
+      return await attempt();
+    } catch (error) {
+      lastError = error;
+      if (!isRetryableUploadError(error) || tryIndex === UPLOAD_RETRY_ATTEMPTS) throw error;
+      const delay = UPLOAD_RETRY_BASE_DELAY_MS * 2 ** (tryIndex - 1);
+      await new Promise((resolve) => setTimeout(resolve, delay));
+    }
+  }
+  throw lastError;
+}
 
 export function sanitizeFolderName(value, fallback = 'Album') {
   const cleaned = String(value ?? '')
@@ -139,34 +171,51 @@ async function ensureSourceFolder(client, item, destination) {
   return folder;
 }
 
-async function uploadChunked(client, { parentId, name, size, filePath }) {
-  const totalChunks = Math.ceil(size / CHUNK_SIZE);
+export async function uploadChunked(client, { parentId, name, size, filePath }) {
+  const chunkSize = uploadChunkSize();
+  const totalChunks = Math.max(1, Math.ceil(size / chunkSize));
   const session = await client.startUploadSession({ parentId, name, size, totalChunks });
   const uploadUrl = session.upload_url ?? session.url;
-  const sessionToken = session.session_token ?? session.token;
-  if (!uploadUrl) {
+  const sessionToken = session.token ?? session.session_token;
+  if (!uploadUrl || !sessionToken) {
     throw new Error('kDrive did not return an upload URL for the chunked session');
   }
-  for (let index = 0; index < totalChunks; index += 1) {
-    const start = index * CHUNK_SIZE;
-    const end = Math.min(start + CHUNK_SIZE, size) - 1;
-    const stream = fs.createReadStream(filePath, { start, end });
-    await client.uploadChunk(uploadUrl, stream, { index, sessionToken });
+  const handle = await fsp.open(filePath, 'r');
+  try {
+    for (let index = 0; index < totalChunks; index += 1) {
+      const start = index * chunkSize;
+      const length = Math.min(chunkSize, size - start);
+      const buffer = Buffer.alloc(length);
+      await handle.read(buffer, 0, length, start);
+      const chunkHash = `sha256:${crypto.createHash('sha256').update(buffer).digest('hex')}`;
+      await withUploadRetry(() =>
+        client.uploadChunk(uploadUrl, buffer, {
+          sessionToken,
+          chunkNumber: index + 1,
+          chunkSize: length,
+          chunkHash,
+        }),
+      );
+    }
+  } finally {
+    await handle.close();
   }
-  return client.finishUploadSession(sessionToken);
+  return withUploadRetry(() => client.finishUploadSession(uploadUrl, sessionToken));
 }
 
 export async function uploadToKDrive({ item, destination, filePath, size }) {
   const { client } = await getKDriveClient(item.owner_id);
   const folder = await ensureSourceFolder(client, item, destination);
   const uploaded =
-    size <= DIRECT_UPLOAD_LIMIT
-      ? await client.uploadFile({
-          parentId: folder.id,
-          name: item.name,
-          size,
-          body: fs.createReadStream(filePath),
-        })
+    size <= directUploadLimit()
+      ? await withUploadRetry(() =>
+          client.uploadFile({
+            parentId: folder.id,
+            name: item.name,
+            size,
+            body: fs.createReadStream(filePath),
+          }),
+        )
       : await uploadChunked(client, {
           parentId: folder.id,
           name: item.name,

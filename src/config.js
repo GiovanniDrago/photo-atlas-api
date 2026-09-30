@@ -31,5 +31,7 @@ export const config = {
     .filter(Boolean),
   uploadTmpDir: process.env.MEDIA_UPLOAD_TMP_DIR ?? path.join(os.homedir(), '.cache', 'photo-atlas', 'uploads'),
   uploadMaxBytes: Number(process.env.UPLOAD_MAX_BYTES ?? 8 * 1024 * 1024 * 1024),
+  directUploadLimitBytes: Number(process.env.DIRECT_UPLOAD_LIMIT_BYTES ?? 32 * 1024 * 1024),
+  uploadChunkSizeBytes: Number(process.env.UPLOAD_CHUNK_SIZE_BYTES ?? 32 * 1024 * 1024),
   maxBatchSize: 500,
 };

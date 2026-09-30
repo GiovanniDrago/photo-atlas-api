@@ -235,6 +235,132 @@ test('upload sends the file to kDrive and marks the item uploaded', { skip }, as
   );
 });
 
+test('upload retries a transient network failure', { skip }, async (t) => {
+  const { userId, token } = await createUser();
+  const sourceId = await createSource(userId, { label: 'Camera' });
+  const itemId = await createItem(sourceId, { name: 'retry.jpg' });
+  const app = await buildApp();
+  t.after(async () => {
+    await app.close();
+    await cleanupUser(userId);
+  });
+
+  fakeKDrive.state.failNextUploads = 1;
+  const attemptsBefore = fakeKDrive.state.uploadAttempts;
+  const response = await app.inject({
+    method: 'POST',
+    url: `/api/media/${itemId}/upload`,
+    headers: {
+      authorization: `Bearer ${token}`,
+      'content-type': 'application/octet-stream',
+    },
+    payload: Buffer.from('retry-bytes'),
+  });
+  assert.equal(response.statusCode, 200, response.body);
+  assert.equal(fakeKDrive.state.uploadAttempts - attemptsBefore, 2);
+
+  const { rows } = await pool.query(
+    'SELECT backup_status FROM media_items WHERE id = $1',
+    [itemId],
+  );
+  assert.equal(rows[0].backup_status, 'uploaded');
+});
+
+test('upload does not retry a kDrive client error', { skip }, async (t) => {
+  const { userId, token } = await createUser();
+  const sourceId = await createSource(userId, { label: 'Camera' });
+  const itemId = await createItem(sourceId, { name: 'rejected.jpg' });
+  const app = await buildApp();
+  t.after(async () => {
+    await app.close();
+    await cleanupUser(userId);
+  });
+
+  fakeKDrive.state.failUploadStatus = 400;
+  const attemptsBefore = fakeKDrive.state.uploadAttempts;
+  const response = await app.inject({
+    method: 'POST',
+    url: `/api/media/${itemId}/upload`,
+    headers: {
+      authorization: `Bearer ${token}`,
+      'content-type': 'application/octet-stream',
+    },
+    payload: Buffer.from('rejected-bytes'),
+  });
+  assert.equal(response.statusCode, 502, response.body);
+  assert.equal(fakeKDrive.state.uploadAttempts - attemptsBefore, 1);
+
+  const { rows } = await pool.query(
+    'SELECT backup_status, backup_error FROM media_items WHERE id = $1',
+    [itemId],
+  );
+  assert.equal(rows[0].backup_status, 'failed');
+  assert.match(rows[0].backup_error, /kDrive upload failed \(400\)/);
+});
+
+test('large uploads use a chunk session and retry a failed chunk', { skip }, async (t) => {
+  const { userId, token } = await createUser();
+  const sourceId = await createSource(userId, { label: 'Camera' });
+  const itemId = await createItem(sourceId, { name: 'video.mp4', size: 20 });
+  const app = await buildApp();
+  t.after(async () => {
+    await app.close();
+    await cleanupUser(userId);
+  });
+
+  const previousLimit = config.directUploadLimitBytes;
+  const previousChunk = config.uploadChunkSizeBytes;
+  config.directUploadLimitBytes = 0;
+  config.uploadChunkSizeBytes = 8;
+  try {
+    fakeKDrive.state.failNextChunks = 1;
+    const chunkAttemptsBefore = fakeKDrive.state.chunkAttempts;
+    const payload = Buffer.from('12345678901234567890');
+    const response = await app.inject({
+      method: 'POST',
+      url: `/api/media/${itemId}/upload`,
+      headers: {
+        authorization: `Bearer ${token}`,
+        'content-type': 'application/octet-stream',
+      },
+      payload,
+    });
+    assert.equal(response.statusCode, 200, response.body);
+    // 3 chunks (8 + 8 + 4): the first attempt of chunk 1 fails and is retried.
+    assert.equal(fakeKDrive.state.chunkAttempts - chunkAttemptsBefore, 4);
+
+    const session = fakeKDrive.state.sessions.at(-1);
+    assert.equal(session.total_chunks, 3);
+    assert.equal(session.finished, true);
+    assert.deepEqual(
+      session.chunks.map((chunk) => [chunk.number, chunk.size, chunk.bytes]),
+      [
+        [1, 8, 8],
+        [2, 8, 8],
+        [3, 4, 4],
+      ],
+    );
+    assert.deepEqual(
+      session.chunks.map((chunk) => chunk.hash),
+      [
+        `sha256:${crypto.createHash('sha256').update(payload.subarray(0, 8)).digest('hex')}`,
+        `sha256:${crypto.createHash('sha256').update(payload.subarray(8, 16)).digest('hex')}`,
+        `sha256:${crypto.createHash('sha256').update(payload.subarray(16, 20)).digest('hex')}`,
+      ],
+    );
+  } finally {
+    config.directUploadLimitBytes = previousLimit;
+    config.uploadChunkSizeBytes = previousChunk;
+  }
+
+  const { rows } = await pool.query(
+    'SELECT backup_status, kdrive_file_id FROM media_items WHERE id = $1',
+    [itemId],
+  );
+  assert.equal(rows[0].backup_status, 'uploaded');
+  assert.ok(rows[0].kdrive_file_id);
+});
+
 test('manual uploads go to Media/PhotoAtlas/Manual', { skip }, async (t) => {
   const { userId, token } = await createUser();
   const sourceId = await createSource(userId, { label: 'Download' });

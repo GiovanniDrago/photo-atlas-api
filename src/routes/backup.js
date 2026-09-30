@@ -308,7 +308,14 @@ export default async function backupRoutes(app) {
         request.log.warn({ err: error.message, mediaId: item.id }, 'upload too large');
         return reply.code(413).send({ error: 'upload_too_large', message: error.message });
       }
-      request.log.warn({ err: error.message }, 'kDrive upload failed');
+      request.log.warn(
+        {
+          err: error.message,
+          cause: error.cause?.code ?? error.cause?.message ?? null,
+          mediaId: item.id,
+        },
+        'kDrive upload failed',
+      );
       await markUploadFailed(item.id, error.message);
       return reply.code(502).send({ error: 'upload_failed', message: error.message });
     } finally {

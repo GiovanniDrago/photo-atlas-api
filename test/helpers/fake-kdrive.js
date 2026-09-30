@@ -15,6 +15,12 @@ export async function startFakeKDrive() {
     deleted: [],
     thumbnails: [],
     nextId: 1000,
+    // Failure injection for the upload retry tests.
+    uploadAttempts: 0,
+    chunkAttempts: 0,
+    failNextUploads: 0,
+    failNextChunks: 0,
+    failUploadStatus: null,
   };
 
   const server = http.createServer(async (request, response) => {
@@ -53,6 +59,17 @@ export async function startFakeKDrive() {
 
     match = path.match(/^\/3\/drive\/(\d+)\/upload$/);
     if (match && request.method === 'POST') {
+      state.uploadAttempts += 1;
+      if (state.failUploadStatus !== null) {
+        const status = state.failUploadStatus;
+        state.failUploadStatus = null;
+        return send(status, { result: 'error', error: { description: 'injected failure' } });
+      }
+      if (state.failNextUploads > 0) {
+        state.failNextUploads -= 1;
+        request.socket.destroy();
+        return;
+      }
       const bytes = await readBody();
       const directoryId = Number(url.searchParams.get('directory_id'));
       const fileName = url.searchParams.get('file_name');
@@ -78,28 +95,41 @@ export async function startFakeKDrive() {
     match = path.match(/^\/3\/drive\/(\d+)\/upload\/session\/start$/);
     if (match && request.method === 'POST') {
       const body = JSON.parse((await readBody()).toString() || '{}');
-      const session = { token: `session-${state.nextId++}`, chunks: [] };
-      state.sessions.push({ ...body, token: session.token });
+      const session = { ...body, token: `session-${state.nextId++}`, chunks: [], finished: false };
+      state.sessions.push(session);
       return send(200, {
         data: {
-          upload_url: `http://127.0.0.1:${server.address().port}/chunk/${session.token}`,
-          session_token: session.token,
+          upload_url: `http://127.0.0.1:${server.address().port}`,
+          token: session.token,
         },
       });
     }
 
-    match = path.match(/^\/chunk\/(.+)$/);
+    match = path.match(/^\/3\/drive\/(\d+)\/upload\/session\/([^/]+)\/chunk$/);
     if (match && request.method === 'POST') {
+      state.chunkAttempts += 1;
+      if (state.failNextChunks > 0) {
+        state.failNextChunks -= 1;
+        request.socket.destroy();
+        return;
+      }
       const bytes = await readBody();
-      const session = state.sessions.find((item) => item.token === match[1]);
-      if (session) session.chunks.push(bytes.length);
+      const session = state.sessions.find((item) => item.token === match[2]);
+      if (session) {
+        session.chunks.push({
+          number: Number(url.searchParams.get('chunk_number')),
+          size: Number(url.searchParams.get('chunk_size')),
+          hash: url.searchParams.get('chunk_hash'),
+          bytes: bytes.length,
+        });
+      }
       return send(200, { result: 'success' });
     }
 
-    match = path.match(/^\/3\/drive\/(\d+)\/upload\/session\/finish$/);
+    match = path.match(/^\/3\/drive\/(\d+)\/upload\/session\/([^/]+)\/finish$/);
     if (match && request.method === 'POST') {
-      const body = JSON.parse((await readBody()).toString() || '{}');
-      const session = state.sessions.find((item) => item.token === body.session_token);
+      const session = state.sessions.find((item) => item.token === match[2]);
+      session.finished = true;
       const file = {
         id: state.nextId++,
         name: session?.file_name ?? 'file',

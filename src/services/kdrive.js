@@ -31,6 +31,32 @@ export function buildChildQuery({ type, cursor, limit } = {}) {
   return search.toString();
 }
 
+/**
+ * Upload failure with the HTTP status when kDrive answered, or status `null`
+ * for a network-level failure (socket reset, DNS, timeout...). The route maps
+ * both to 502 but only the retryable ones are attempted again.
+ */
+export class KDriveUploadError extends Error {
+  constructor(message, { status = null, cause = null } = {}) {
+    super(message);
+    this.name = 'KDriveUploadError';
+    this.status = status;
+    this.cause = cause;
+  }
+}
+
+export function isRetryableUploadError(error) {
+  if (!(error instanceof KDriveUploadError)) return false;
+  if (error.status === null) return true;
+  return error.status === 429 || error.status >= 500;
+}
+
+function networkError(error) {
+  const cause = error?.cause;
+  const detail = cause?.code || cause?.errno || cause?.message || error?.message || 'unknown';
+  return new KDriveUploadError(`kDrive upload request failed: ${detail}`, { cause: error });
+}
+
 export class KDriveClient {
   constructor({ token, driveId, baseUrl = 'https://api.infomaniak.com', minIntervalMs = DEFAULT_MIN_INTERVAL_MS }) {
     this.token = token;
@@ -202,18 +228,31 @@ export class KDriveClient {
     url.searchParams.set('total_size', String(size));
     url.searchParams.set('conflict', 'rename');
     const isStream = body && typeof body !== 'string' && !Buffer.isBuffer(body);
-    const response = await fetch(url, {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${this.token}`,
-        'Content-Type': 'application/octet-stream',
-      },
-      body,
-      ...(isStream ? { duplex: 'half' } : {}),
-    });
-    const text = await response.text();
+    let response;
+    try {
+      response = await fetch(url, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${this.token}`,
+          'Content-Type': 'application/octet-stream',
+        },
+        body,
+        ...(isStream ? { duplex: 'half' } : {}),
+      });
+    } catch (error) {
+      throw networkError(error);
+    }
+    let text;
+    try {
+      text = await response.text();
+    } catch (error) {
+      throw networkError(error);
+    }
     if (!response.ok) {
-      throw new Error(`kDrive upload failed (${response.status}): ${text.slice(0, 300)}`);
+      throw new KDriveUploadError(
+        `kDrive upload failed (${response.status}): ${text.slice(0, 300)}`,
+        { status: response.status },
+      );
     }
     const parsed = text ? JSON.parse(text) : {};
     return parsed.data ?? parsed;
@@ -233,33 +272,87 @@ export class KDriveClient {
     return body.data ?? body;
   }
 
-  async uploadChunk(uploadUrl, chunk, { index, sessionToken } = {}) {
+  /**
+   * Uploads one chunk of a session. The route lives on the session's
+   * `upload_url` host (a kDrive upload node), with the standard API path and
+   * the chunk metadata as query parameters (same layout as the official
+   * clients).
+   */
+  async uploadChunk(uploadUrl, chunk, { sessionToken, chunkNumber, chunkSize, chunkHash } = {}) {
     await this.throttle();
-    const url = new URL(uploadUrl);
-    if (index !== undefined && index !== null) url.searchParams.set('chunk', String(index));
+    const base = uploadUrl.replace(/\/+$/, '');
+    const url = new URL(
+      `${base}/3/drive/${this.driveId}/upload/session/${encodeURIComponent(sessionToken)}/chunk`,
+    );
+    if (chunkNumber !== undefined && chunkNumber !== null) {
+      url.searchParams.set('chunk_number', String(chunkNumber));
+    }
+    if (chunkSize !== undefined && chunkSize !== null) {
+      url.searchParams.set('chunk_size', String(chunkSize));
+    }
+    if (chunkHash) {
+      url.searchParams.set('chunk_hash', chunkHash);
+    }
     const isStream = chunk && typeof chunk !== 'string' && !Buffer.isBuffer(chunk);
-    const response = await fetch(url, {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${this.token}`,
-        'Content-Type': 'application/octet-stream',
-        ...(sessionToken ? { 'X-Session-Token': sessionToken } : {}),
-      },
-      body: chunk,
-      ...(isStream ? { duplex: 'half' } : {}),
-    });
-    const text = await response.text();
+    let response;
+    try {
+      response = await fetch(url, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${this.token}`,
+          'Content-Type': 'application/octet-stream',
+        },
+        body: chunk,
+        ...(isStream ? { duplex: 'half' } : {}),
+      });
+    } catch (error) {
+      throw networkError(error);
+    }
+    let text;
+    try {
+      text = await response.text();
+    } catch (error) {
+      throw networkError(error);
+    }
     if (!response.ok) {
-      throw new Error(`kDrive chunk upload failed (${response.status}): ${text.slice(0, 300)}`);
+      throw new KDriveUploadError(
+        `kDrive chunk upload failed (${response.status}): ${text.slice(0, 300)}`,
+        { status: response.status },
+      );
     }
     return text ? JSON.parse(text) : {};
   }
 
-  async finishUploadSession(sessionToken) {
-    const body = await this.requestJson(`/3/drive/${this.driveId}/upload/session/finish`, {
-      method: 'POST',
-      body: { session_token: sessionToken },
-    });
-    return body.data ?? body;
+  async finishUploadSession(uploadUrl, sessionToken) {
+    await this.throttle();
+    const base = uploadUrl.replace(/\/+$/, '');
+    const url = `${base}/3/drive/${this.driveId}/upload/session/${encodeURIComponent(sessionToken)}/finish`;
+    let response;
+    try {
+      response = await fetch(url, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${this.token}`,
+          'Content-Type': 'application/json',
+        },
+        body: '{}',
+      });
+    } catch (error) {
+      throw networkError(error);
+    }
+    let text;
+    try {
+      text = await response.text();
+    } catch (error) {
+      throw networkError(error);
+    }
+    if (!response.ok) {
+      throw new KDriveUploadError(
+        `kDrive session finish failed (${response.status}): ${text.slice(0, 300)}`,
+        { status: response.status },
+      );
+    }
+    const parsed = text ? JSON.parse(text) : {};
+    return parsed.data ?? parsed;
   }
 }
