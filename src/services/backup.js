@@ -171,7 +171,7 @@ async function ensureSourceFolder(client, item, destination) {
   return folder;
 }
 
-export async function uploadChunked(client, { parentId, name, size, filePath }) {
+export async function uploadChunked(client, { parentId, name, size, filePath, log = null }) {
   const chunkSize = uploadChunkSize();
   const totalChunks = Math.max(1, Math.ceil(size / chunkSize));
   const session = await client.startUploadSession({ parentId, name, size, totalChunks });
@@ -180,6 +180,7 @@ export async function uploadChunked(client, { parentId, name, size, filePath }) 
   if (!uploadUrl || !sessionToken) {
     throw new Error('kDrive did not return an upload URL for the chunked session');
   }
+  log?.info({ name, size, totalChunks }, 'kDrive chunked upload started');
   const handle = await fsp.open(filePath, 'r');
   try {
     for (let index = 0; index < totalChunks; index += 1) {
@@ -188,6 +189,7 @@ export async function uploadChunked(client, { parentId, name, size, filePath }) 
       const buffer = Buffer.alloc(length);
       await handle.read(buffer, 0, length, start);
       const chunkHash = `sha256:${crypto.createHash('sha256').update(buffer).digest('hex')}`;
+      const chunkStartedAt = Date.now();
       await withUploadRetry(() =>
         client.uploadChunk(uploadUrl, buffer, {
           sessionToken,
@@ -196,6 +198,16 @@ export async function uploadChunked(client, { parentId, name, size, filePath }) 
           chunkHash,
         }),
       );
+      log?.info(
+        {
+          name,
+          chunk: index + 1,
+          totalChunks,
+          bytes: length,
+          ms: Date.now() - chunkStartedAt,
+        },
+        'kDrive chunk uploaded',
+      );
     }
   } finally {
     await handle.close();
@@ -203,7 +215,7 @@ export async function uploadChunked(client, { parentId, name, size, filePath }) 
   return withUploadRetry(() => client.finishUploadSession(uploadUrl, sessionToken));
 }
 
-export async function uploadToKDrive({ item, destination, filePath, size }) {
+export async function uploadToKDrive({ item, destination, filePath, size, log = null }) {
   const { client } = await getKDriveClient(item.owner_id);
   const folder = await ensureSourceFolder(client, item, destination);
   const uploaded =
@@ -221,6 +233,7 @@ export async function uploadToKDrive({ item, destination, filePath, size }) {
           name: item.name,
           size,
           filePath,
+          log,
         });
   const fileId = uploaded?.id ?? uploaded?.file?.id ?? null;
   return { folder, fileId, uploaded };

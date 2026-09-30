@@ -272,6 +272,12 @@ export default async function backupRoutes(app) {
     }
     const destination = request.query?.destination === 'manual' ? 'manual' : 'source';
     let temp = null;
+    // The app can give up (or be closed) while the file is still travelling to
+    // kDrive: the upload is not aborted, so record it in the logs.
+    let clientDisconnected = false;
+    request.raw.on('close', () => {
+      if (!reply.raw.writableEnded) clientDisconnected = true;
+    });
     try {
       temp = await streamToTempFile(request.body);
       if (temp.size === 0) {
@@ -287,6 +293,7 @@ export default async function backupRoutes(app) {
         destination,
         filePath: temp.filePath,
         size: temp.size,
+        log: request.log,
       });
       await applyUploadedMetadata(item.id, metadata);
       await markUploaded(item.id, {
@@ -295,6 +302,12 @@ export default async function backupRoutes(app) {
         sha256: temp.sha256,
         size: temp.size,
       });
+      if (clientDisconnected) {
+        request.log.warn(
+          { mediaId: item.id, name: item.name, bytes: temp.size },
+          'upload finished after the client disconnected',
+        );
+      }
       return {
         ok: true,
         media_id: item.id,
@@ -313,6 +326,7 @@ export default async function backupRoutes(app) {
           err: error.message,
           cause: error.cause?.code ?? error.cause?.message ?? null,
           mediaId: item.id,
+          clientDisconnected,
         },
         'kDrive upload failed',
       );

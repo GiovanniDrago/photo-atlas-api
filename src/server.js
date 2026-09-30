@@ -80,7 +80,7 @@ function reachableUrls(port) {
 
 await app.listen({ port: config.port, host: config.host });
 
-sweepUploadTmpDir().catch(() => {});
+sweepUploadTmpDir(0).catch(() => {});
 
 if (config.localMediaRoots.length === 0) {
   app.log.warn('LOCAL_MEDIA_ROOTS is empty: the thumbnail endpoint will serve any readable path. Set it before exposing the API.');
