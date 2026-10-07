@@ -61,6 +61,34 @@ function sendStream(reply, stream) {
   return reply.send(stream);
 }
 
+const KDRIVE_FETCH_ATTEMPTS = 3;
+
+/// Opens a kDrive download, retrying transient network failures and 5xx/429
+/// answers. Safe because it runs before any byte is sent to the client.
+async function fetchKDriveFile(client, fileId, { headers, log, mediaId } = {}) {
+  let lastError = null;
+  for (let attempt = 1; attempt <= KDRIVE_FETCH_ATTEMPTS; attempt += 1) {
+    if (attempt > 1) {
+      await new Promise((resolve) => setTimeout(resolve, 500 * (attempt - 1)));
+    }
+    try {
+      const response = await client.download(fileId, { headers });
+      if (response.ok || (response.status < 500 && response.status !== 429)) {
+        return response;
+      }
+      lastError = new Error(`kDrive download failed (${response.status})`);
+      await response.body?.cancel().catch(() => {});
+    } catch (error) {
+      lastError = error;
+    }
+    log?.warn(
+      { err: lastError?.message, attempt, mediaId },
+      'kdrive download fetch failed, retrying',
+    );
+  }
+  throw lastError ?? new Error('kDrive download failed');
+}
+
 function streamFile(reply, filePath, mime, cacheSeconds = 604800) {
   reply.header('Content-Type', mime ?? 'application/octet-stream');
   reply.header('Cache-Control', `public, max-age=${cacheSeconds}`);
@@ -303,7 +331,10 @@ export default async function mediaRoutes(app) {
     if (fileId != null) {
       try {
         const { client } = await getKDriveClient(item.owner_id);
-        const response = await client.download(fileId);
+        const response = await fetchKDriveFile(client, fileId, {
+          log: request.log,
+          mediaId,
+        });
         if (!response.ok) throw new Error(`kDrive download failed (${response.status})`);
         reply.header('Content-Type', contentType);
         reply.header('Content-Disposition', `attachment; filename="${filename}"`);
@@ -381,8 +412,10 @@ export default async function mediaRoutes(app) {
 
     try {
       const { client } = await getKDriveClient(item.owner_id);
-      const upstream = await client.download(fileId, {
+      const upstream = await fetchKDriveFile(client, fileId, {
         headers: range ? { Range: range } : undefined,
+        log: request.log,
+        mediaId,
       });
       if (!upstream.ok) {
         request.log.warn({ status: upstream.status, mediaId }, 'kdrive stream failed');

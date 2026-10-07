@@ -39,6 +39,8 @@ test.after(async () => {
 
 test.beforeEach(() => {
   fakeKDrive.state.downloads.length = 0;
+  fakeKDrive.state.downloadAttempts = 0;
+  fakeKDrive.state.failNextDownloads = 0;
 });
 
 async function buildApp() {
@@ -208,6 +210,46 @@ test('download proxies uploaded local items from kDrive', { skip }, async () => 
     assert.match(response.headers['content-disposition'], /attachment; filename="VID_0001\.mp4"/);
     assert.deepEqual(response.rawPayload, CONTENT);
     assert.deepEqual(fakeKDrive.state.downloads, [{ fileId: FILE_ID, range: null }]);
+  } finally {
+    await app.close();
+    await cleanupUser(userId);
+  }
+});
+
+test('download retries a transient kDrive network failure', { skip }, async () => {
+  const app = await buildApp();
+  const { userId } = await createUser();
+  try {
+    const mediaId = await createUploadedItem(userId);
+    fakeKDrive.state.failNextDownloads = 1;
+    const response = await app.inject({
+      method: 'GET',
+      url: `/api/media/${mediaId}/download?s=${signAsset('download', mediaId)}`,
+    });
+    assert.equal(response.statusCode, 200);
+    assert.deepEqual(response.rawPayload, CONTENT);
+    assert.equal(fakeKDrive.state.downloadAttempts, 2);
+    assert.deepEqual(fakeKDrive.state.downloads, [{ fileId: FILE_ID, range: null }]);
+  } finally {
+    await app.close();
+    await cleanupUser(userId);
+  }
+});
+
+test('stream retries a transient kDrive network failure', { skip }, async () => {
+  const app = await buildApp();
+  const { userId } = await createUser();
+  try {
+    const mediaId = await createUploadedItem(userId);
+    fakeKDrive.state.failNextDownloads = 1;
+    const response = await app.inject({
+      method: 'GET',
+      url: `/api/media/${mediaId}/stream?s=${signAsset('stream', mediaId)}`,
+      headers: { range: 'bytes=2-5' },
+    });
+    assert.equal(response.statusCode, 206);
+    assert.deepEqual(response.rawPayload, CONTENT.subarray(2, 6));
+    assert.equal(fakeKDrive.state.downloadAttempts, 2);
   } finally {
     await app.close();
     await cleanupUser(userId);

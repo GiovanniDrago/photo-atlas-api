@@ -15,6 +15,8 @@ export async function startFakeKDrive() {
     deleted: [],
     thumbnails: [],
     downloads: [],
+    downloadAttempts: 0,
+    failNextDownloads: 0,
     nextId: 1000,
     // Failure injection for the upload retry tests.
     uploadAttempts: 0,
@@ -160,6 +162,12 @@ export async function startFakeKDrive() {
 
     match = path.match(/^\/2\/drive\/(\d+)\/files\/(\d+)\/download$/);
     if (match && request.method === 'GET') {
+      state.downloadAttempts += 1;
+      if (state.failNextDownloads > 0) {
+        state.failNextDownloads -= 1;
+        request.socket.destroy();
+        return;
+      }
       const fileId = Number(match[2]);
       const file = state.files.get(fileId);
       if (!file) {
