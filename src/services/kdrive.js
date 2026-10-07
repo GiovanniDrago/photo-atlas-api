@@ -96,10 +96,10 @@ export class KDriveClient {
     return text ? JSON.parse(text) : {};
   }
 
-  async requestStream(pathname) {
+  async requestStream(pathname, { headers } = {}) {
     await this.throttle();
     return fetch(`${this.baseUrl}${pathname}`, {
-      headers: { Authorization: `Bearer ${this.token}` },
+      headers: { Authorization: `Bearer ${this.token}`, ...(headers ?? {}) },
     });
   }
 
@@ -173,8 +173,8 @@ export class KDriveClient {
     return this.requestStream(`/2/drive/${this.driveId}/files/${fileId}/thumbnail?width=${width}`);
   }
 
-  async download(fileId) {
-    return this.requestStream(`/2/drive/${this.driveId}/files/${fileId}/download`);
+  async download(fileId, { headers } = {}) {
+    return this.requestStream(`/2/drive/${this.driveId}/files/${fileId}/download`, { headers });
   }
 
   async deleteFile(fileId) {

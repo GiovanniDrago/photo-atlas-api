@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import { Readable } from 'node:stream';
 import { query } from '../db.js';
 import { config } from '../config.js';
 import { verifyAssetSignature } from '../lib/signed-url.js';
@@ -20,6 +21,44 @@ function isUuid(value) {
 
 function clamp(value, min, max) {
   return Math.min(Math.max(value, min), max);
+}
+
+/// Parses a single-range `bytes=` header against a known total; null when the
+/// header is absent or not satisfiable.
+function parseRange(header, total) {
+  const match = /^bytes=(\d*)-(\d*)$/.exec(String(header ?? '').trim());
+  if (!match) return null;
+  const [, rawStart, rawEnd] = match;
+  if (rawStart === '' && rawEnd === '') return null;
+  let start;
+  let end;
+  if (rawStart === '') {
+    const length = Number(rawEnd);
+    if (!Number.isFinite(length) || length <= 0) return null;
+    start = Math.max(0, total - length);
+    end = total - 1;
+  } else {
+    start = Number(rawStart);
+    end = rawEnd === '' ? total - 1 : Number(rawEnd);
+  }
+  if (!Number.isFinite(start) || !Number.isFinite(end)) return null;
+  if (start > end || start >= total) return null;
+  return { start, end: Math.min(end, total - 1) };
+}
+
+/// kDrive file id of a row: uploaded local rows keep their id on
+/// `kdrive_file_id`, kDrive-sourced rows use the external key.
+function cloudFileId(row) {
+  if (row.kdrive_file_id != null) return String(row.kdrive_file_id);
+  if (row.source_kind === 'kdrive' && row.external_key) return String(row.external_key);
+  return null;
+}
+
+function sendStream(reply, stream) {
+  // The player aborts range requests while seeking: stop the upstream pull.
+  reply.raw.on('close', () => stream.destroy());
+  stream.on('error', () => reply.raw.destroy());
+  return reply.send(stream);
 }
 
 function streamFile(reply, filePath, mime, cacheSeconds = 604800) {
@@ -241,30 +280,130 @@ export default async function mediaRoutes(app) {
     if (rows.length === 0) return reply.code(404).send({ error: 'not_found' });
     const item = rows[0];
     const filename = (item.name ?? 'download').replace(/["\r\n]/g, '_');
+    const contentType = item.mime ?? 'application/octet-stream';
 
-    if (item.source_kind === 'kdrive' && item.external_key) {
+    if (request.method === 'HEAD') {
+      reply.hijack();
+      reply.raw.writeHead(200, {
+        'Content-Type': contentType,
+        'Content-Disposition': `attachment; filename="${filename}"`,
+        ...(item.size_bytes != null ? { 'Content-Length': String(item.size_bytes) } : {}),
+      });
+      reply.raw.end();
+      return reply;
+    }
+
+    if (item.source_kind === 'local' && isAllowedLocalPath(item.path)) {
+      reply.header('Content-Type', contentType);
+      reply.header('Content-Disposition', `attachment; filename="${filename}"`);
+      return sendStream(reply, fs.createReadStream(item.path));
+    }
+
+    const fileId = cloudFileId(item);
+    if (fileId != null) {
       try {
         const { client } = await getKDriveClient(item.owner_id);
-        const response = await client.download(item.external_key);
+        const response = await client.download(fileId);
         if (!response.ok) throw new Error(`kDrive download failed (${response.status})`);
-        reply.header('Content-Type', item.mime ?? 'application/octet-stream');
+        reply.header('Content-Type', contentType);
         reply.header('Content-Disposition', `attachment; filename="${filename}"`);
         reply.header('Cache-Control', 'private, max-age=0');
-        const buffer = Buffer.from(await response.arrayBuffer());
-        return reply.send(buffer);
+        const contentLength = response.headers.get('content-length');
+        if (contentLength) reply.header('Content-Length', contentLength);
+        if (!response.body) throw new Error('kDrive download returned no body');
+        return sendStream(reply, Readable.fromWeb(response.body));
       } catch (error) {
         request.log.warn({ err: error.message }, 'kdrive download failed');
         return reply.code(502).send({ error: 'download_failed' });
       }
     }
 
-    if (item.source_kind === 'local' && isAllowedLocalPath(item.path)) {
-      reply.header('Content-Type', item.mime ?? 'application/octet-stream');
-      reply.header('Content-Disposition', `attachment; filename="${filename}"`);
-      return reply.send(fs.createReadStream(item.path));
+    return reply.code(404).send({ error: 'file_unavailable' });
+  });
+
+  app.get('/api/media/:id/stream', async (request, reply) => {
+    const mediaId = request.params.id;
+    if (!isUuid(mediaId)) return reply.code(400).send({ error: 'invalid id' });
+    if (!verifyAssetSignature('stream', mediaId, request.query?.s)) {
+      return reply.code(401).send({ error: 'invalid signature' });
     }
 
-    return reply.code(404).send({ error: 'file_unavailable' });
+    const { rows } = await query(
+      `SELECT m.*, s.kind AS source_kind, s.owner_id
+       FROM media_items m
+       JOIN sources s ON s.id = m.source_id
+       WHERE m.id = $1`,
+      [mediaId],
+    );
+    if (rows.length === 0) return reply.code(404).send({ error: 'not_found' });
+    const item = rows[0];
+    const contentType = item.mime ?? 'application/octet-stream';
+    const range = request.headers.range;
+
+    // The web player probes with HEAD before playing: answer from the indexed
+    // row so a 145 MB video is not pulled from kDrive just to be discarded.
+    if (request.method === 'HEAD') {
+      reply.hijack();
+      reply.raw.writeHead(200, {
+        'Content-Type': contentType,
+        'Accept-Ranges': 'bytes',
+        ...(item.size_bytes != null ? { 'Content-Length': String(item.size_bytes) } : {}),
+      });
+      reply.raw.end();
+      return reply;
+    }
+
+    if (item.source_kind === 'local' && isAllowedLocalPath(item.path)) {
+      try {
+        const stat = await fs.promises.stat(item.path);
+        const parsed = parseRange(range, stat.size);
+        reply.header('Content-Type', contentType);
+        reply.header('Accept-Ranges', 'bytes');
+        if (parsed) {
+          reply.code(206);
+          reply.header('Content-Range', `bytes ${parsed.start}-${parsed.end}/${stat.size}`);
+          reply.header('Content-Length', String(parsed.end - parsed.start + 1));
+          return sendStream(
+            reply,
+            fs.createReadStream(item.path, { start: parsed.start, end: parsed.end }),
+          );
+        }
+        reply.header('Content-Length', String(stat.size));
+        return sendStream(reply, fs.createReadStream(item.path));
+      } catch (error) {
+        request.log.warn({ err: error.message }, 'local stream failed');
+        return reply.code(404).send({ error: 'file_unavailable' });
+      }
+    }
+
+    const fileId = cloudFileId(item);
+    if (fileId == null) return reply.code(404).send({ error: 'file_unavailable' });
+
+    try {
+      const { client } = await getKDriveClient(item.owner_id);
+      const upstream = await client.download(fileId, {
+        headers: range ? { Range: range } : undefined,
+      });
+      if (!upstream.ok) {
+        request.log.warn({ status: upstream.status, mediaId }, 'kdrive stream failed');
+        return reply.code(502).send({ error: 'stream_failed' });
+      }
+      if (!upstream.body) throw new Error('kDrive stream returned no body');
+      reply.code(upstream.status);
+      reply.header(
+        'Content-Type',
+        item.mime ?? upstream.headers.get('content-type') ?? 'application/octet-stream',
+      );
+      reply.header('Accept-Ranges', upstream.headers.get('accept-ranges') ?? 'bytes');
+      for (const name of ['content-length', 'content-range']) {
+        const value = upstream.headers.get(name);
+        if (value) reply.header(name, value);
+      }
+      return sendStream(reply, Readable.fromWeb(upstream.body));
+    } catch (error) {
+      request.log.warn({ err: error.message, mediaId }, 'kdrive stream failed');
+      return reply.code(502).send({ error: 'stream_failed' });
+    }
   });
 
   app.post('/api/media/delete', async (request, reply) => {

@@ -25,16 +25,21 @@ export function assetUrls(mediaId) {
   return {
     thumbnail_url: `/api/media/${mediaId}/thumbnail?m=${mediaId}&s=${signAsset('thumb', mediaId)}`,
     download_url: `/api/media/${mediaId}/download?m=${mediaId}&s=${signAsset('download', mediaId)}`,
+    stream_url: `/api/media/${mediaId}/stream?m=${mediaId}&s=${signAsset('stream', mediaId)}`,
   };
 }
 
 export function withAssetUrls(row, baseUrl) {
   const urls = assetUrls(row.id);
-  const downloadAvailable =
-    row.source_kind !== 'local' || isAllowedLocalPath(row.path);
+  // Uploaded items stay on a local source row but their file lives on kDrive:
+  // the cloud copy makes both download and streaming available.
+  const cloudAvailable =
+    row.kdrive_file_id != null || row.source_kind === 'kdrive';
+  const available = cloudAvailable || isAllowedLocalPath(row.path);
   return {
     ...row,
     thumbnail_url: `${baseUrl}${urls.thumbnail_url}`,
-    download_url: downloadAvailable ? `${baseUrl}${urls.download_url}` : null,
+    download_url: available ? `${baseUrl}${urls.download_url}` : null,
+    stream_url: available ? `${baseUrl}${urls.stream_url}` : null,
   };
 }

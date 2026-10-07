@@ -16,6 +16,9 @@ test('asset endpoints reject requests without a valid signature', async (t) => {
   const download = await app.inject({ method: 'GET', url: `/api/media/${ID}/download?s=bogus` });
   assert.equal(download.statusCode, 401);
 
+  const stream = await app.inject({ method: 'GET', url: `/api/media/${ID}/stream?s=bogus` });
+  assert.equal(stream.statusCode, 401);
+
   const invalidId = await app.inject({ method: 'GET', url: '/api/media/not-a-uuid/thumbnail?s=x' });
   assert.equal(invalidId.statusCode, 400);
 });

@@ -14,6 +14,7 @@ export async function startFakeKDrive() {
     sessions: [],
     deleted: [],
     thumbnails: [],
+    downloads: [],
     nextId: 1000,
     // Failure injection for the upload retry tests.
     uploadAttempts: 0,
@@ -87,6 +88,7 @@ export async function startFakeKDrive() {
         size: bytes.length,
         parentId: directoryId,
         type: 'file',
+        content: bytes,
       };
       state.files.set(file.id, file);
       return send(200, { data: file });
@@ -121,6 +123,7 @@ export async function startFakeKDrive() {
           size: Number(url.searchParams.get('chunk_size')),
           hash: url.searchParams.get('chunk_hash'),
           bytes: bytes.length,
+          data: bytes,
         });
       }
       return send(200, { result: 'success' });
@@ -130,12 +133,18 @@ export async function startFakeKDrive() {
     if (match && request.method === 'POST') {
       const session = state.sessions.find((item) => item.token === match[2]);
       session.finished = true;
+      const content = Buffer.concat(
+        [...(session?.chunks ?? [])]
+          .sort((a, b) => a.number - b.number)
+          .map((chunk) => chunk.data),
+      );
       const file = {
         id: state.nextId++,
         name: session?.file_name ?? 'file',
         size: session?.total_size ?? 0,
         parentId: session?.directory_id ?? null,
         type: 'file',
+        content,
       };
       state.files.set(file.id, file);
       return send(200, { data: file });
@@ -147,6 +156,45 @@ export async function startFakeKDrive() {
       return file
         ? send(200, { data: file })
         : send(404, { result: 'error', error: { description: 'File not found' } });
+    }
+
+    match = path.match(/^\/2\/drive\/(\d+)\/files\/(\d+)\/download$/);
+    if (match && request.method === 'GET') {
+      const fileId = Number(match[2]);
+      const file = state.files.get(fileId);
+      if (!file) {
+        return send(404, { result: 'error', error: { description: 'File not found' } });
+      }
+      const body = file.content ?? Buffer.alloc(file.size ?? 0);
+      const range = request.headers.range ?? null;
+      state.downloads.push({ fileId, range });
+      let start = 0;
+      let end = Math.max(0, body.length - 1);
+      let status = 200;
+      const rangeMatch = /^bytes=(\d*)-(\d*)$/.exec(String(range ?? '').trim());
+      if (rangeMatch && (rangeMatch[1] !== '' || rangeMatch[2] !== '')) {
+        if (rangeMatch[1] === '') {
+          start = Math.max(0, body.length - Number(rangeMatch[2]));
+        } else {
+          start = Number(rangeMatch[1]);
+          if (rangeMatch[2] !== '') end = Math.min(Number(rangeMatch[2]), body.length - 1);
+        }
+        if (start > end || start >= body.length) {
+          response.writeHead(416, { 'Content-Range': `bytes */${body.length}` });
+          response.end();
+          return;
+        }
+        status = 206;
+      }
+      const headers = {
+        'Content-Type': file.mime ?? 'application/octet-stream',
+        'Accept-Ranges': 'bytes',
+        'Content-Length': String(end - start + 1),
+      };
+      if (status === 206) headers['Content-Range'] = `bytes ${start}-${end}/${body.length}`;
+      response.writeHead(status, headers);
+      response.end(body.subarray(start, end + 1));
+      return;
     }
 
     match = path.match(/^\/2\/drive\/(\d+)\/files\/(\d+)\/thumbnail$/);

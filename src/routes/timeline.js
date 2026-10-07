@@ -8,6 +8,7 @@ const ITEM_FIELDS = `
   m.size_bytes, m.taken_at, m.file_created_at, m.modified_at, m.lat, m.lon,
   (m.lat IS NOT NULL AND m.lon IS NOT NULL) AS has_gps,
   m.metadata_status, m.width, m.height, m.duration_s, m.backup_status,
+  m.kdrive_file_id,
   s.kind AS source_kind, s.label AS source_label
 `;
 

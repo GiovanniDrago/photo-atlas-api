@@ -120,7 +120,7 @@ export function registerAuthHook(app) {
     const url = request.url.split('?')[0];
     if (!url.startsWith('/api/')) return;
     if (PUBLIC_PATHS.has(url)) return;
-    if (/^\/api\/media\/[0-9a-f-]{36}\/(thumbnail|download)$/i.test(url)) return;
+    if (/^\/api\/media\/[0-9a-f-]{36}\/(thumbnail|download|stream)$/i.test(url)) return;
     return requireAuth(request, reply);
   });
 }
