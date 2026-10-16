@@ -263,9 +263,11 @@ media type. Unknown fields/ops, out-of-range values or empty rules are rejected 
 Originals are uploaded to `KDRIVE_BASE_PATH` (default `Media/PhotoAtlas`): per-folder backups land
 in `Media/PhotoAtlas/<folder>`, manual uploads in `Media/PhotoAtlas/Manual`. Files keep their name
 and kDrive is asked to rename on conflict, so nothing is ever overwritten. Uploads are driven by the
-app; the API streams the body to a temporary file, computes the SHA-256 while streaming, extracts
-EXIF from images (server-side metadata is authoritative), then uploads to kDrive (direct up to
-1 GB, chunked session above) and records the state in `media_items`.
+app. The single-request path streams the body to a temporary file, computes the SHA-256 while
+streaming, extracts EXIF from images (server-side metadata is authoritative), then uploads to kDrive
+(direct up to `DIRECT_UPLOAD_LIMIT_BYTES`, default 32 MiB, chunked session above) and records the
+state in `media_items`. Large files can instead use the resumable chunked path below, which skips
+the temporary file and lets an interrupted upload resume from the last stored chunk.
 
 ```bash
 # register this device (fingerprint is stable per installation)
@@ -284,8 +286,27 @@ curl -X POST "http://localhost:8787/api/media/<uuid>/upload?destination=manual" 
   -H "Authorization: Bearer <token>" -H 'Content-Type: application/octet-stream' \
   --data-binary @IMG_0001.jpg
 
+# resumable chunked upload (large files): open/resume a session...
+curl -X POST "http://localhost:8787/api/media/<uuid>/upload/init?destination=manual" \
+  -H "Authorization: Bearer <token>" -H 'Content-Type: application/json' \
+  -d '{"size":52428800,"chunk_size":8388608}'
+# ...send each chunk in order (index starts at 0; a re-sent index is a no-op)...
+curl -X POST "http://localhost:8787/api/media/<uuid>/upload/chunk?index=0" \
+  -H "Authorization: Bearer <token>" -H 'Content-Type: application/octet-stream' \
+  --data-binary @chunk0.bin
+# ...and finalize (metadata is optional)
+curl -X POST "http://localhost:8787/api/media/<uuid>/upload/finish" \
+  -H "Authorization: Bearer <token>" -H 'Content-Type: application/json' \
+  -d '{"size":52428800}'
+
 # check that a backed-up file still exists on kDrive (missing -> back to pending)
 curl -X POST http://localhost:8787/api/media/<uuid>/verify -H "Authorization: Bearer <token>"
+
+# release the claims of an interrupted run, or recover claims that are not progressing
+curl -X POST http://localhost:8787/api/backup/release -H "Authorization: Bearer <token>" \
+  -H 'Content-Type: application/json' -d '{"ids":["<uuid>"]}'
+curl -X POST http://localhost:8787/api/backup/recover -H "Authorization: Bearer <token>" \
+  -H 'Content-Type: application/json' -d '{"source_id":"<uuid>"}'
 
 # runs (kind backup|verify) with counters
 curl -X POST http://localhost:8787/api/backup/runs -H "Authorization: Bearer <token>" \
@@ -294,17 +315,26 @@ curl -X PATCH http://localhost:8787/api/backup/runs/<uuid> -H "Authorization: Be
   -H 'Content-Type: application/json' -d '{"status":"completed","files_uploaded":12}'
 ```
 
+The chunked session is stored in `upload_sessions` (`status='open'`, `uploaded_chunks`,
+`chunk_size`, `size_bytes`); `init` returns the existing session when one is open for the item, so
+the app resumes from `uploaded_chunks`. Chunk size is clamped to 256 KiB–64 MiB
+(`CLIENT_UPLOAD_CHUNK_BYTES`, default 8 MiB).
+
 Media payloads now include `backup_status`, `kdrive_file_id`, `backed_up_at` and `backup_error`;
 `GET /api/media` accepts `backup_status=none,pending` and `device_id=`. The batch endpoint
 (`POST /api/media/batch`) also returns `items: [{id, external_key}]` so the app can upload right
 after indexing. kDrive-sourced items are marked `uploaded` automatically.
 
 `GET /api/backup/pending` **claims** the rows it returns: each item is atomically set to
-`backup_status='uploading'` (`FOR UPDATE SKIP LOCKED`), so a foreground run and the Android
-background worker never upload the same file twice (`conflict=rename` would create a duplicate on
-kDrive). A claim older than 2 hours (worker killed mid-upload) is released back to `pending` with
+`backup_status='uploading'` (`FOR UPDATE SKIP LOCKED`) and its `backup_claimed_at` is stamped, so a
+foreground run and the Android background worker never upload the same file twice
+(`conflict=rename` would create a duplicate on kDrive). A claim older than `STALE_UPLOAD_MS`
+(default 15 minutes, worker killed mid-upload) is released back to `pending` with
 `backup_error='stale_upload'` at the start of the next call; `GET /api/backup/status` counts
-`uploading` items as pending. A completed backup run also updates `sources.backup_last_run_at`.
+`uploading` items as pending. `POST /api/backup/release` releases explicit ids, and
+`POST /api/backup/recover` releases the claims of this owner that are no longer progressing (older
+than `RECOVER_GRACE_MS`, default 60 s). A completed backup run also updates
+`sources.backup_last_run_at`.
 
 ## Clusters (planet map)
 

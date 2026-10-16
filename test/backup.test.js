@@ -701,3 +701,193 @@ test('backup release ignores other users and empty id lists', { skip }, async ()
     await cleanupUser(stranger.userId);
   }
 });
+
+test('pending sweep recovers claims older than the stale window', { skip }, async (t) => {
+  const app = await buildApp();
+  const { userId, token } = await createUser();
+  const previousStale = config.staleUploadMs;
+  try {
+    const sourceId = await createSource(userId);
+    const claimed = await createItem(sourceId, { status: 'uploading' });
+    await pool.query(
+      `UPDATE media_items
+       SET backup_claimed_at = now() - interval '10 seconds',
+           updated_at = now() - interval '10 seconds'
+       WHERE id = $1`,
+      [claimed],
+    );
+
+    config.staleUploadMs = 1000;
+    const response = await app.inject({
+      method: 'GET',
+      url: '/api/backup/pending',
+      headers: { authorization: `Bearer ${token}` },
+    });
+    assert.equal(response.statusCode, 200, response.body);
+    const items = response.json().items;
+    assert.equal(items.length, 1);
+    assert.equal(items[0].id, claimed);
+    assert.equal(items[0].backup_error, 'stale_upload');
+  } finally {
+    config.staleUploadMs = previousStale;
+    await app.close();
+    await cleanupUser(userId);
+  }
+});
+
+test('backup recover returns only non-progressing claims to pending', { skip }, async () => {
+  const app = await buildApp();
+  const { userId, token } = await createUser();
+  try {
+    const sourceId = await createSource(userId);
+    const oldClaim = await createItem(sourceId, { status: 'uploading' });
+    const freshClaim = await createItem(sourceId, { status: 'uploading' });
+    await pool.query(
+      "UPDATE media_items SET backup_claimed_at = now() - interval '5 minutes' WHERE id = $1",
+      [oldClaim],
+    );
+    await pool.query(
+      'UPDATE media_items SET backup_claimed_at = now() WHERE id = $1',
+      [freshClaim],
+    );
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/backup/recover',
+      headers: { authorization: `Bearer ${token}` },
+      payload: { source_id: sourceId },
+    });
+    assert.equal(response.statusCode, 200, response.body);
+    assert.equal(response.json().released, 1);
+
+    const { rows } = await pool.query(
+      'SELECT id, backup_status FROM media_items WHERE id = ANY($1::uuid[])',
+      [[oldClaim, freshClaim]],
+    );
+    const byId = new Map(rows.map((row) => [row.id, row.backup_status]));
+    assert.equal(byId.get(oldClaim), 'pending');
+    assert.equal(byId.get(freshClaim), 'uploading');
+  } finally {
+    await app.close();
+    await cleanupUser(userId);
+  }
+});
+
+test('resumable chunked upload can be interrupted and resumed', { skip }, async (t) => {
+  const { userId, token } = await createUser();
+  const sourceId = await createSource(userId, { label: 'Camera' });
+  // The API enforces a 256 KiB minimum chunk size.
+  const chunkSize = 256 * 1024;
+  const size = chunkSize * 2 + 17;
+  const itemId = await createItem(sourceId, { name: 'clip.mp4', size });
+  const part0 = Buffer.alloc(chunkSize, 0x41);
+  const part1 = Buffer.alloc(chunkSize, 0x42);
+  const part2 = Buffer.alloc(17, 0x43);
+  const app = await buildApp();
+  t.after(async () => {
+    await app.close();
+    await cleanupUser(userId);
+  });
+  const auth = { authorization: `Bearer ${token}` };
+  const octet = { ...auth, 'content-type': 'application/octet-stream' };
+
+  const init = await app.inject({
+    method: 'POST',
+    url: `/api/media/${itemId}/upload/init`,
+    headers: auth,
+    payload: { size, chunk_size: chunkSize },
+  });
+  assert.equal(init.statusCode, 200, init.body);
+  assert.equal(init.json().session.chunk_size, chunkSize);
+  assert.equal(init.json().session.total_chunks, 3);
+  assert.equal(init.json().session.uploaded_chunks, 0);
+
+  const chunk0 = await app.inject({
+    method: 'POST',
+    url: `/api/media/${itemId}/upload/chunk?index=0`,
+    headers: octet,
+    payload: part0,
+  });
+  assert.equal(chunk0.statusCode, 200, chunk0.body);
+  assert.equal(chunk0.json().uploaded_chunks, 1);
+
+  const resumed = await app.inject({
+    method: 'POST',
+    url: `/api/media/${itemId}/upload/init`,
+    headers: auth,
+    payload: { size, chunk_size: chunkSize },
+  });
+  assert.equal(resumed.json().session.uploaded_chunks, 1);
+
+  const duplicate = await app.inject({
+    method: 'POST',
+    url: `/api/media/${itemId}/upload/chunk?index=0`,
+    headers: octet,
+    payload: part0,
+  });
+  assert.equal(duplicate.statusCode, 200);
+  assert.equal(duplicate.json().uploaded_chunks, 1);
+
+  const outOfOrder = await app.inject({
+    method: 'POST',
+    url: `/api/media/${itemId}/upload/chunk?index=2`,
+    headers: octet,
+    payload: part2,
+  });
+  assert.equal(outOfOrder.statusCode, 409);
+  assert.equal(outOfOrder.json().error, 'out_of_order');
+
+  const early = await app.inject({
+    method: 'POST',
+    url: `/api/media/${itemId}/upload/finish`,
+    headers: auth,
+    payload: { size },
+  });
+  assert.equal(early.statusCode, 409);
+  assert.equal(early.json().error, 'incomplete');
+
+  const chunk1 = await app.inject({
+    method: 'POST',
+    url: `/api/media/${itemId}/upload/chunk?index=1`,
+    headers: octet,
+    payload: part1,
+  });
+  assert.equal(chunk1.json().uploaded_chunks, 2);
+  const chunk2 = await app.inject({
+    method: 'POST',
+    url: `/api/media/${itemId}/upload/chunk?index=2`,
+    headers: octet,
+    payload: part2,
+  });
+  assert.equal(chunk2.json().uploaded_chunks, 3);
+
+  const finish = await app.inject({
+    method: 'POST',
+    url: `/api/media/${itemId}/upload/finish`,
+    headers: auth,
+    payload: { size },
+  });
+  assert.equal(finish.statusCode, 200, finish.body);
+  assert.equal(finish.json().ok, true);
+
+  const { rows } = await pool.query(
+    'SELECT backup_status, kdrive_file_id FROM media_items WHERE id = $1',
+    [itemId],
+  );
+  assert.equal(rows[0].backup_status, 'uploaded');
+  assert.ok(rows[0].kdrive_file_id);
+
+  const { rows: sessionRows } = await pool.query(
+    'SELECT status FROM upload_sessions WHERE media_id = $1',
+    [itemId],
+  );
+  assert.equal(sessionRows[0].status, 'closed');
+
+  const ksession = fakeKDrive.state.sessions.at(-1);
+  assert.equal(ksession.finished, true);
+  const assembled = Buffer.concat(
+    [...ksession.chunks].sort((a, b) => a.number - b.number).map((chunk) => chunk.data),
+  );
+  assert.ok(assembled.equals(Buffer.concat([part0, part1, part2])));
+});
+

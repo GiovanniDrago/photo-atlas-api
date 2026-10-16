@@ -267,8 +267,8 @@ export async function markUploaded(itemId, { fileId, parentId, sha256, size }) {
        backup_status = 'uploaded',
        kdrive_file_id = $2,
        kdrive_parent_id = $3,
-       content_hash = $4,
-       hash_algo = 'sha256',
+       content_hash = COALESCE($4, content_hash),
+       hash_algo = CASE WHEN $4 IS NULL THEN hash_algo ELSE 'sha256' END,
        backed_up_at = now(),
        backup_error = NULL,
        backup_attempts = backup_attempts + 1,
@@ -291,6 +291,94 @@ export async function markUploadFailed(itemId, message) {
      WHERE id = $1`,
     [itemId, String(message ?? 'upload failed').slice(0, 500)],
   );
+}
+
+/** Reads a small request body (one chunk) into memory, enforcing the cap. */
+export async function readStreamToBuffer(readable, { maxBytes = config.uploadMaxBytes } = {}) {
+  const chunks = [];
+  let size = 0;
+  for await (const chunk of readable) {
+    size += chunk.length;
+    if (maxBytes > 0 && size > maxBytes) throw new UploadTooLargeError(maxBytes);
+    chunks.push(chunk);
+  }
+  return Buffer.concat(chunks);
+}
+
+/** The open, non-expired kDrive session for an item, if any (for resume). */
+export async function getOpenUploadSession(mediaId) {
+  const { rows } = await query(
+    `SELECT * FROM upload_sessions
+     WHERE media_id = $1 AND status = 'open'
+       AND (expires_at IS NULL OR expires_at > now())
+     ORDER BY created_at DESC
+     LIMIT 1`,
+    [mediaId],
+  );
+  return rows[0] ?? null;
+}
+
+export async function closeUploadSession(sessionId) {
+  await query(
+    "UPDATE upload_sessions SET status = 'closed', updated_at = now() WHERE id = $1",
+    [sessionId],
+  );
+}
+
+/** Opens a kDrive chunked session and records it for resuming. */
+export async function startResumableUpload({ item, destination, size, chunkSize, name }) {
+  const { client } = await getKDriveClient(item.owner_id);
+  const folder = await ensureSourceFolder(client, item, destination);
+  const totalChunks = Math.max(1, Math.ceil(size / chunkSize));
+  const session = await client.startUploadSession({
+    parentId: folder.id,
+    name,
+    size,
+    totalChunks,
+  });
+  const uploadUrl = session.upload_url ?? session.url;
+  const sessionToken = session.token ?? session.session_token;
+  if (!uploadUrl || !sessionToken) {
+    throw new Error('kDrive did not return an upload URL for the chunked session');
+  }
+  const { rows } = await query(
+    `INSERT INTO upload_sessions
+       (media_id, session_token, upload_url, total_chunks, uploaded_chunks,
+        chunk_size, size_bytes, parent_id, status, updated_at)
+     VALUES ($1, $2, $3, $4, 0, $5, $6, $7, 'open', now())
+     RETURNING *`,
+    [item.id, sessionToken, uploadUrl, totalChunks, chunkSize, size, folder.id],
+  );
+  return { session: rows[0], folder };
+}
+
+/** Forwards one chunk (0-based [index]) to the kDrive session. */
+export async function uploadSessionChunk({ ownerId, session, index, buffer }) {
+  const { client } = await getKDriveClient(ownerId);
+  const chunkHash = `sha256:${crypto.createHash('sha256').update(buffer).digest('hex')}`;
+  await withUploadRetry(() =>
+    client.uploadChunk(session.upload_url, buffer, {
+      sessionToken: session.session_token,
+      chunkNumber: index + 1,
+      chunkSize: buffer.length,
+      chunkHash,
+    }),
+  );
+  await query(
+    'UPDATE upload_sessions SET uploaded_chunks = $2, updated_at = now() WHERE id = $1',
+    [session.id, index + 1],
+  );
+}
+
+/** Finalizes the kDrive session; returns the created file id. */
+export async function finishResumableUpload({ ownerId, session }) {
+  const { client } = await getKDriveClient(ownerId);
+  const uploaded = await withUploadRetry(() =>
+    client.finishUploadSession(session.upload_url, session.session_token),
+  );
+  const fileId = uploaded?.id ?? uploaded?.file?.id ?? null;
+  await closeUploadSession(session.id);
+  return { fileId };
 }
 
 export async function markMissingOnKDrive(itemId) {

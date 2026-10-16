@@ -4,12 +4,18 @@ import { getKDriveClient } from '../services/kdrive-account.js';
 import {
   UploadTooLargeError,
   applyUploadedMetadata,
+  closeUploadSession,
   extractMetadata,
+  finishResumableUpload,
+  getOpenUploadSession,
   markMissingOnKDrive,
   markUploadFailed,
   markUploaded,
+  readStreamToBuffer,
   removeTempFile,
+  startResumableUpload,
   streamToTempFile,
+  uploadSessionChunk,
   uploadToKDrive,
 } from '../services/backup.js';
 
@@ -21,6 +27,28 @@ function isUuid(value) {
 
 function clamp(value, min, max) {
   return Math.min(Math.max(value, min), max);
+}
+
+function serializeSession(session) {
+  return {
+    id: session.id,
+    chunk_size: Number(session.chunk_size),
+    total_chunks: Number(session.total_chunks),
+    uploaded_chunks: Number(session.uploaded_chunks),
+    size_bytes: Number(session.size_bytes),
+  };
+}
+
+function normalizeMetadata(value) {
+  if (!value || typeof value !== 'object') return null;
+  const takenAt = typeof value.taken_at === 'string' ? new Date(value.taken_at) : null;
+  return {
+    takenAt: takenAt && !Number.isNaN(takenAt.getTime()) ? takenAt : null,
+    lat: typeof value.lat === 'number' ? value.lat : null,
+    lon: typeof value.lon === 'number' ? value.lon : null,
+    width: typeof value.width === 'number' ? value.width : null,
+    height: typeof value.height === 'number' ? value.height : null,
+  };
 }
 
 async function ownedItem(userId, mediaId) {
@@ -100,15 +128,17 @@ export default async function backupRoutes(app) {
       sourceClause = `AND m.source_id = $${params.length}`;
     }
     params.push(limit);
+    const staleBefore = new Date(Date.now() - config.staleUploadMs);
     await query(
       `UPDATE media_items m
-       SET backup_status = 'pending', backup_error = 'stale_upload', updated_at = now()
+       SET backup_status = 'pending', backup_error = 'stale_upload',
+           backup_claimed_at = NULL, updated_at = now()
        FROM sources s
        WHERE m.source_id = s.id
          AND s.owner_id = $1
          AND m.backup_status = 'uploading'
-         AND m.updated_at < now() - interval '2 hours'`,
-      [request.user.id],
+         AND COALESCE(m.backup_claimed_at, m.updated_at) < $2`,
+      [request.user.id, staleBefore],
     );
     const { rows } = await query(
       `WITH candidates AS (
@@ -124,7 +154,7 @@ export default async function backupRoutes(app) {
          FOR UPDATE OF m SKIP LOCKED
        )
        UPDATE media_items m
-       SET backup_status = 'uploading', updated_at = now()
+       SET backup_status = 'uploading', backup_claimed_at = now(), updated_at = now()
        FROM candidates c
        JOIN sources s ON s.id = c.source_id
        WHERE m.id = c.id
@@ -137,7 +167,7 @@ export default async function backupRoutes(app) {
   });
 
   // Releases claims taken by an interrupted run (uploading -> pending) so the
-  // next run can retry them immediately instead of waiting for the 2h sweep.
+  // next run can retry them immediately instead of waiting for the stale sweep.
   app.post('/api/backup/release', async (request, reply) => {
     const body = request.body ?? {};
     const ids = Array.isArray(body.ids) ? body.ids.filter(isUuid) : [];
@@ -147,13 +177,42 @@ export default async function backupRoutes(app) {
     }
     const result = await query(
       `UPDATE media_items m
-       SET backup_status = 'pending', backup_error = NULL, updated_at = now()
+       SET backup_status = 'pending', backup_error = NULL,
+           backup_claimed_at = NULL, updated_at = now()
        FROM sources s
        WHERE m.source_id = s.id
          AND s.owner_id = $2
          AND m.id = ANY($1::uuid[])
          AND m.backup_status = 'uploading'`,
       [ids, request.user.id],
+    );
+    return { released: result.rowCount ?? 0 };
+  });
+
+  // Explicit recovery used by the app's "Retry": returns claims of this owner
+  // that are not actively progressing (older than the grace window).
+  app.post('/api/backup/recover', async (request, reply) => {
+    const sourceId = request.body?.source_id ?? null;
+    if (sourceId != null && !isUuid(sourceId)) {
+      return reply.code(400).send({ error: 'invalid source_id' });
+    }
+    const params = [request.user.id, new Date(Date.now() - config.recoverGraceMs)];
+    let sourceClause = '';
+    if (sourceId) {
+      params.push(sourceId);
+      sourceClause = `AND m.source_id = $${params.length}`;
+    }
+    const result = await query(
+      `UPDATE media_items m
+       SET backup_status = 'pending', backup_error = NULL,
+           backup_claimed_at = NULL, updated_at = now()
+       FROM sources s
+       WHERE m.source_id = s.id
+         AND s.owner_id = $1
+         AND m.backup_status = 'uploading'
+         AND COALESCE(m.backup_claimed_at, m.updated_at) < $2
+         ${sourceClause}`,
+      params,
     );
     return { released: result.rowCount ?? 0 };
   });
@@ -334,6 +393,152 @@ export default async function backupRoutes(app) {
       return reply.code(502).send({ error: 'upload_failed', message: error.message });
     } finally {
       await removeTempFile(temp?.filePath);
+    }
+  });
+
+  // --- Resumable (client-driven) chunked upload ---------------------------
+  // Used for large files (long videos) over a slow link: the client uploads
+  // chunks one by one to a kDrive session. If the run is interrupted the
+  // session stays open and the next run resumes from uploaded_chunks.
+
+  app.post('/api/media/:id/upload/init', async (request, reply) => {
+    if (!isUuid(request.params.id)) return reply.code(400).send({ error: 'invalid id' });
+    const item = await ownedItem(request.user.id, request.params.id);
+    if (!item) return reply.code(404).send({ error: 'not_found' });
+    if (item.source_kind === 'kdrive') {
+      return reply.code(400).send({ error: 'already_on_kdrive' });
+    }
+    const destination = request.query?.destination === 'manual' ? 'manual' : 'source';
+    const body = request.body ?? {};
+    const size = Number(body.size);
+    if (!Number.isFinite(size) || size <= 0) {
+      return reply.code(400).send({ error: 'invalid_size' });
+    }
+    const chunkSize = clamp(
+      Number(body.chunk_size ?? config.clientUploadChunkBytes),
+      256 * 1024,
+      64 * 1024 * 1024,
+    );
+    const name =
+      typeof body.name === 'string' && body.name.trim().length > 0
+        ? body.name.trim()
+        : item.name;
+    const existing = await getOpenUploadSession(item.id);
+    if (existing) {
+      if (Number(existing.size_bytes) === size) {
+        return { session: serializeSession(existing) };
+      }
+      await closeUploadSession(existing.id);
+    }
+    try {
+      const { session } = await startResumableUpload({
+        item,
+        destination,
+        size,
+        chunkSize,
+        name,
+      });
+      return { session: serializeSession(session) };
+    } catch (error) {
+      request.log.warn({ err: error.message, mediaId: item.id }, 'kDrive session start failed');
+      return reply.code(502).send({ error: 'upload_failed', message: error.message });
+    }
+  });
+
+  app.post(
+    '/api/media/:id/upload/chunk',
+    { bodyLimit: config.uploadMaxBytes },
+    async (request, reply) => {
+      if (!isUuid(request.params.id)) return reply.code(400).send({ error: 'invalid id' });
+      const index = Number(request.query?.index);
+      if (!Number.isInteger(index) || index < 0) {
+        return reply.code(400).send({ error: 'invalid_index' });
+      }
+      const item = await ownedItem(request.user.id, request.params.id);
+      if (!item) return reply.code(404).send({ error: 'not_found' });
+      const session = await getOpenUploadSession(item.id);
+      if (!session) return reply.code(409).send({ error: 'no_session' });
+      const total = Number(session.total_chunks);
+      const uploaded = Number(session.uploaded_chunks);
+      if (index >= total) return reply.code(400).send({ error: 'index_out_of_range' });
+      if (index < uploaded) {
+        return { ok: true, uploaded_chunks: uploaded, total_chunks: total };
+      }
+      if (index > uploaded) {
+        return reply
+          .code(409)
+          .send({ error: 'out_of_order', uploaded_chunks: uploaded, total_chunks: total });
+      }
+      let buffer;
+      try {
+        buffer = await readStreamToBuffer(request.body);
+      } catch (error) {
+        if (error instanceof UploadTooLargeError) {
+          return reply.code(413).send({ error: 'upload_too_large', message: error.message });
+        }
+        throw error;
+      }
+      if (buffer.length === 0) return reply.code(400).send({ error: 'empty_chunk' });
+      try {
+        await uploadSessionChunk({ ownerId: request.user.id, session, index, buffer });
+      } catch (error) {
+        request.log.warn(
+          { err: error.message, mediaId: item.id, index },
+          'kDrive chunk upload failed',
+        );
+        return reply.code(502).send({ error: 'upload_failed', message: error.message });
+      }
+      return { ok: true, uploaded_chunks: index + 1, total_chunks: total };
+    },
+  );
+
+  app.post('/api/media/:id/upload/finish', async (request, reply) => {
+    if (!isUuid(request.params.id)) return reply.code(400).send({ error: 'invalid id' });
+    const item = await ownedItem(request.user.id, request.params.id);
+    if (!item) return reply.code(404).send({ error: 'not_found' });
+    const session = await getOpenUploadSession(item.id);
+    if (!session) return reply.code(409).send({ error: 'no_session' });
+    const uploaded = Number(session.uploaded_chunks);
+    const total = Number(session.total_chunks);
+    if (uploaded < total) {
+      return reply
+        .code(409)
+        .send({ error: 'incomplete', uploaded_chunks: uploaded, total_chunks: total });
+    }
+    const body = request.body ?? {};
+    const sha256 =
+      typeof body.content_hash === 'string' && body.content_hash.length > 0
+        ? body.content_hash
+        : null;
+    const size = Number(body.size ?? session.size_bytes);
+    try {
+      const metadata = normalizeMetadata(body.metadata);
+      if (metadata) await applyUploadedMetadata(item.id, metadata);
+      const { fileId } = await finishResumableUpload({
+        ownerId: request.user.id,
+        session,
+      });
+      await markUploaded(item.id, {
+        fileId,
+        parentId: session.parent_id,
+        sha256,
+        size,
+      });
+      return {
+        ok: true,
+        media_id: item.id,
+        kdrive_file_id: fileId,
+        kdrive_parent_id: session.parent_id,
+        content_hash: sha256,
+        bytes: size,
+      };
+    } catch (error) {
+      if (error instanceof UploadTooLargeError) {
+        return reply.code(413).send({ error: 'upload_too_large', message: error.message });
+      }
+      request.log.warn({ err: error.message, mediaId: item.id }, 'kDrive session finish failed');
+      await markUploadFailed(item.id, error.message);
+      return reply.code(502).send({ error: 'upload_failed', message: error.message });
     }
   });
 
