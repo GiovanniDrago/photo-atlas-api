@@ -4,10 +4,12 @@ import { getKDriveClient } from '../services/kdrive-account.js';
 import {
   UploadTooLargeError,
   applyUploadedMetadata,
+  closeExpiredUploadSessions,
   closeUploadSession,
   extractMetadata,
   finishResumableUpload,
   getOpenUploadSession,
+  isUploadSessionInvalid,
   markMissingOnKDrive,
   markUploadFailed,
   markUploaded,
@@ -64,6 +66,50 @@ async function ownedItem(userId, mediaId) {
   return rows[0] ?? null;
 }
 
+/**
+ * Resolves the media ids of this owner to act on for a retry: an explicit id
+ * list, or the items of a source (optionally only the failed ones).
+ */
+async function ownedTargetIds(userId, { ids, sourceId, failedOnly }) {
+  if (ids && ids.length > 0) {
+    const { rows } = await query(
+      `SELECT m.id FROM media_items m
+       JOIN sources s ON s.id = m.source_id
+       WHERE s.owner_id = $1 AND m.id = ANY($2::uuid[])`,
+      [userId, ids],
+    );
+    return rows.map((row) => row.id);
+  }
+  if (!sourceId) return [];
+  const statuses = failedOnly
+    ? ['failed']
+    : ['none', 'pending', 'uploading', 'failed', 'skipped'];
+  const { rows } = await query(
+    `SELECT m.id FROM media_items m
+     JOIN sources s ON s.id = m.source_id
+     WHERE s.owner_id = $1 AND m.source_id = $2
+       AND m.backup_status = ANY($3::text[])`,
+    [userId, sourceId, statuses],
+  );
+  return rows.map((row) => row.id);
+}
+
+/** Closes the open upload sessions of the given media (owner-scoped). */
+async function closeSessionsFor(userId, mediaIds) {
+  if (mediaIds.length === 0) return;
+  await query(
+    `UPDATE upload_sessions us
+     SET status = 'closed', updated_at = now()
+     WHERE us.status = 'open' AND us.media_id = ANY($1::uuid[])
+       AND EXISTS (
+         SELECT 1 FROM media_items m
+         JOIN sources s ON s.id = m.source_id
+         WHERE m.id = us.media_id AND s.owner_id = $2
+       )`,
+    [mediaIds, userId],
+  );
+}
+
 export default async function backupRoutes(app) {
   app.post('/api/devices', async (request, reply) => {
     const { fingerprint, name, platform } = request.body ?? {};
@@ -92,6 +138,7 @@ export default async function backupRoutes(app) {
          count(m.id) FILTER (WHERE m.backup_status = 'uploaded')::int AS uploaded,
          count(m.id) FILTER (WHERE m.backup_status IN ('none', 'pending', 'uploading'))::int AS pending,
          count(m.id) FILTER (WHERE m.backup_status = 'failed')::int AS failed,
+         count(m.id) FILTER (WHERE m.backup_status = 'skipped')::int AS skipped,
          coalesce(sum(m.size_bytes) FILTER (WHERE m.backup_status = 'uploaded'), 0)::bigint AS bytes_uploaded,
          coalesce(sum(m.size_bytes), 0)::bigint AS bytes_total
        FROM sources s
@@ -107,10 +154,11 @@ export default async function backupRoutes(app) {
         uploaded: accumulator.uploaded + Number(row.uploaded),
         pending: accumulator.pending + Number(row.pending),
         failed: accumulator.failed + Number(row.failed),
+        skipped: accumulator.skipped + Number(row.skipped),
         bytes_uploaded: accumulator.bytes_uploaded + Number(row.bytes_uploaded),
         bytes_total: accumulator.bytes_total + Number(row.bytes_total),
       }),
-      { total: 0, uploaded: 0, pending: 0, failed: 0, bytes_uploaded: 0, bytes_total: 0 },
+      { total: 0, uploaded: 0, pending: 0, failed: 0, skipped: 0, bytes_uploaded: 0, bytes_total: 0 },
     );
     return { sources: rows, totals };
   });
@@ -215,6 +263,60 @@ export default async function backupRoutes(app) {
       params,
     );
     return { released: result.rowCount ?? 0 };
+  });
+
+  // Manual retry from the app's inspection screen: resets the selected items
+  // (or a whole source) to pending and drops any dead upload session, so the
+  // next run uploads them fresh.
+  app.post('/api/backup/retry', async (request, reply) => {
+    const body = request.body ?? {};
+    const ids = Array.isArray(body.ids) ? body.ids.filter(isUuid) : [];
+    const sourceId = body.source_id ?? null;
+    const failedOnly = body.failed_only === true;
+    if (sourceId != null && !isUuid(sourceId)) {
+      return reply.code(400).send({ error: 'invalid source_id' });
+    }
+    if (ids.length === 0 && !sourceId) {
+      return reply.code(400).send({ error: 'no_target' });
+    }
+    if (ids.length > config.maxBatchSize) {
+      return reply.code(400).send({ error: 'too_many_ids' });
+    }
+    const targetIds = await ownedTargetIds(request.user.id, { ids, sourceId, failedOnly });
+    if (targetIds.length === 0) return { queued: 0 };
+    const { rowCount } = await query(
+      `UPDATE media_items
+       SET backup_status = 'pending', backup_error = NULL,
+           backup_claimed_at = NULL, backup_attempts = 0, updated_at = now()
+       WHERE id = ANY($1::uuid[])`,
+      [targetIds],
+    );
+    await closeSessionsFor(request.user.id, targetIds);
+    return { queued: rowCount ?? 0 };
+  });
+
+  // Marks items as 'skipped' so runs stop retrying them (an explicit retry
+  // brings them back to pending).
+  app.post('/api/backup/skip', async (request, reply) => {
+    const body = request.body ?? {};
+    const ids = Array.isArray(body.ids) ? body.ids.filter(isUuid) : [];
+    if (ids.length === 0) return reply.code(400).send({ error: 'no_ids' });
+    if (ids.length > config.maxBatchSize) {
+      return reply.code(400).send({ error: 'too_many_ids' });
+    }
+    const result = await query(
+      `UPDATE media_items m
+       SET backup_status = 'skipped', backup_error = NULL,
+           backup_claimed_at = NULL, updated_at = now()
+       FROM sources s
+       WHERE m.source_id = s.id
+         AND s.owner_id = $2
+         AND m.id = ANY($1::uuid[])
+         AND m.backup_status <> 'uploaded'`,
+      [ids, request.user.id],
+    );
+    await closeSessionsFor(request.user.id, ids);
+    return { skipped: result.rowCount ?? 0 };
   });
 
   app.get('/api/backup/verify-queue', async (request, reply) => {
@@ -430,6 +532,9 @@ export default async function backupRoutes(app) {
       }
       await closeUploadSession(existing.id);
     }
+    // kDrive cancels a session after 4 hours; drop any dead 'open' row so the
+    // new one can be inserted (partial unique index: one open session/media).
+    await closeExpiredUploadSessions(item.id);
     try {
       const { session } = await startResumableUpload({
         item,
@@ -482,6 +587,13 @@ export default async function backupRoutes(app) {
       try {
         await uploadSessionChunk({ ownerId: request.user.id, session, index, buffer });
       } catch (error) {
+        if (isUploadSessionInvalid(error)) {
+          // The kDrive token expired (sessions last 4 hours): close it so the
+          // client can open a fresh one and restart.
+          await closeUploadSession(session.id);
+          request.log.warn({ mediaId: item.id, index }, 'kDrive upload session expired');
+          return reply.code(410).send({ error: 'session_expired' });
+        }
         request.log.warn(
           { err: error.message, mediaId: item.id, index },
           'kDrive chunk upload failed',
@@ -535,6 +647,11 @@ export default async function backupRoutes(app) {
     } catch (error) {
       if (error instanceof UploadTooLargeError) {
         return reply.code(413).send({ error: 'upload_too_large', message: error.message });
+      }
+      if (isUploadSessionInvalid(error)) {
+        await closeUploadSession(session.id);
+        request.log.warn({ mediaId: item.id }, 'kDrive upload session expired on finish');
+        return reply.code(410).send({ error: 'session_expired' });
       }
       request.log.warn({ err: error.message, mediaId: item.id }, 'kDrive session finish failed');
       await markUploadFailed(item.id, error.message);

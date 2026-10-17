@@ -35,6 +35,9 @@ export const config = {
   uploadChunkSizeBytes: Number(process.env.UPLOAD_CHUNK_SIZE_BYTES ?? 32 * 1024 * 1024),
   // Chunk size used by the client-driven resumable upload endpoints.
   clientUploadChunkBytes: Number(process.env.CLIENT_UPLOAD_CHUNK_BYTES ?? 8 * 1024 * 1024),
+  // kDrive cancels an upload session after 4 hours: sessions older than this
+  // are never resumed (a new one is opened instead).
+  uploadSessionTtlMs: Number(process.env.UPLOAD_SESSION_TTL_MS ?? 4 * 60 * 60 * 1000),
   // Claims ('uploading') older than this are returned to the queue.
   staleUploadMs: Number(process.env.STALE_UPLOAD_MS ?? 15 * 60 * 1000),
   // Grace window for /api/backup/recover so an in-flight upload is not reset.

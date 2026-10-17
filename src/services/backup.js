@@ -310,7 +310,7 @@ export async function getOpenUploadSession(mediaId) {
   const { rows } = await query(
     `SELECT * FROM upload_sessions
      WHERE media_id = $1 AND status = 'open'
-       AND (expires_at IS NULL OR expires_at > now())
+       AND expires_at IS NOT NULL AND expires_at > now()
      ORDER BY created_at DESC
      LIMIT 1`,
     [mediaId],
@@ -318,10 +318,35 @@ export async function getOpenUploadSession(mediaId) {
   return rows[0] ?? null;
 }
 
+/**
+ * Closes open sessions that kDrive has already cancelled (expired `expires_at`,
+ * or legacy rows with a NULL deadline). Needed before opening a new session for
+ * the same item: the partial unique index allows only one 'open' row per media.
+ */
+export async function closeExpiredUploadSessions(mediaId) {
+  const { rowCount } = await query(
+    `UPDATE upload_sessions
+     SET status = 'closed', updated_at = now()
+     WHERE media_id = $1 AND status = 'open'
+       AND (expires_at IS NULL OR expires_at <= now())`,
+    [mediaId],
+  );
+  return rowCount ?? 0;
+}
+
 export async function closeUploadSession(sessionId) {
   await query(
     "UPDATE upload_sessions SET status = 'closed', updated_at = now() WHERE id = $1",
     [sessionId],
+  );
+}
+
+/** True when kDrive rejected the chunk/finish because the session token died. */
+export function isUploadSessionInvalid(error) {
+  const message = String(error?.message ?? '');
+  return (
+    error?.status === 400 &&
+    /invalid_upload_token|upload token is invalid/i.test(message)
   );
 }
 
@@ -341,13 +366,16 @@ export async function startResumableUpload({ item, destination, size, chunkSize,
   if (!uploadUrl || !sessionToken) {
     throw new Error('kDrive did not return an upload URL for the chunked session');
   }
+  // kDrive cancels a session after 4 hours; store the deadline so it is never
+  // resumed afterwards.
+  const expiresAt = new Date(Date.now() + config.uploadSessionTtlMs);
   const { rows } = await query(
     `INSERT INTO upload_sessions
        (media_id, session_token, upload_url, total_chunks, uploaded_chunks,
-        chunk_size, size_bytes, parent_id, status, updated_at)
-     VALUES ($1, $2, $3, $4, 0, $5, $6, $7, 'open', now())
+        chunk_size, size_bytes, parent_id, status, expires_at, updated_at)
+     VALUES ($1, $2, $3, $4, 0, $5, $6, $7, 'open', $8, now())
      RETURNING *`,
-    [item.id, sessionToken, uploadUrl, totalChunks, chunkSize, size, folder.id],
+    [item.id, sessionToken, uploadUrl, totalChunks, chunkSize, size, folder.id, expiresAt],
   );
   return { session: rows[0], folder };
 }

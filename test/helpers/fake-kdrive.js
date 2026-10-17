@@ -24,6 +24,8 @@ export async function startFakeKDrive() {
     failNextUploads: 0,
     failNextChunks: 0,
     failUploadStatus: null,
+    chunkFailStatus: null,
+    chunkFailBody: null,
   };
 
   const server = http.createServer(async (request, response) => {
@@ -112,6 +114,17 @@ export async function startFakeKDrive() {
     match = path.match(/^\/3\/drive\/(\d+)\/upload\/session\/([^/]+)\/chunk$/);
     if (match && request.method === 'POST') {
       state.chunkAttempts += 1;
+      if (state.chunkFailStatus !== null) {
+        const status = state.chunkFailStatus;
+        const body =
+          state.chunkFailBody ?? {
+            result: 'error',
+            error: { code: 'injected_error', description: 'injected chunk failure' },
+          };
+        state.chunkFailStatus = null;
+        state.chunkFailBody = null;
+        return send(status, body);
+      }
       if (state.failNextChunks > 0) {
         state.failNextChunks -= 1;
         request.socket.destroy();

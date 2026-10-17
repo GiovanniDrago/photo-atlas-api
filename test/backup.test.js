@@ -891,3 +891,189 @@ test('resumable chunked upload can be interrupted and resumed', { skip }, async 
   assert.ok(assembled.equals(Buffer.concat([part0, part1, part2])));
 });
 
+test('an expired kDrive session is not resumed', { skip }, async (t) => {
+  const { userId, token } = await createUser();
+  const sourceId = await createSource(userId, { label: 'Camera' });
+  const chunkSize = 256 * 1024;
+  const size = chunkSize * 2;
+  const itemId = await createItem(sourceId, { name: 'clip.mp4', size });
+  const app = await buildApp();
+  t.after(async () => {
+    await app.close();
+    await cleanupUser(userId);
+  });
+  const auth = { authorization: `Bearer ${token}` };
+
+  const first = await app.inject({
+    method: 'POST',
+    url: `/api/media/${itemId}/upload/init`,
+    headers: auth,
+    payload: { size, chunk_size: chunkSize },
+  });
+  assert.equal(first.statusCode, 200, first.body);
+  const firstSessionId = first.json().session.id;
+
+  // Simulate a session older than the kDrive 4 hour lifetime.
+  await pool.query(
+    "UPDATE upload_sessions SET expires_at = now() - interval '1 hour' WHERE id = $1",
+    [firstSessionId],
+  );
+
+  const second = await app.inject({
+    method: 'POST',
+    url: `/api/media/${itemId}/upload/init`,
+    headers: auth,
+    payload: { size, chunk_size: chunkSize },
+  });
+  assert.equal(second.statusCode, 200, second.body);
+  assert.notEqual(second.json().session.id, firstSessionId);
+  assert.equal(second.json().session.uploaded_chunks, 0);
+
+  const { rows } = await pool.query('SELECT status FROM upload_sessions WHERE id = $1', [
+    firstSessionId,
+  ]);
+  assert.equal(rows[0].status, 'closed');
+});
+
+test('a dead kDrive session returns 410 and is closed', { skip }, async (t) => {
+  const { userId, token } = await createUser();
+  const sourceId = await createSource(userId, { label: 'Camera' });
+  const chunkSize = 256 * 1024;
+  const size = chunkSize;
+  const itemId = await createItem(sourceId, { name: 'clip.mp4', size });
+  const app = await buildApp();
+  t.after(async () => {
+    await app.close();
+    await cleanupUser(userId);
+  });
+  const auth = { authorization: `Bearer ${token}` };
+  const octet = { ...auth, 'content-type': 'application/octet-stream' };
+
+  const init = await app.inject({
+    method: 'POST',
+    url: `/api/media/${itemId}/upload/init`,
+    headers: auth,
+    payload: { size, chunk_size: chunkSize },
+  });
+  assert.equal(init.statusCode, 200, init.body);
+  const sessionId = init.json().session.id;
+
+  fakeKDrive.state.chunkFailStatus = 400;
+  fakeKDrive.state.chunkFailBody = {
+    result: 'error',
+    error: { code: 'invalid_upload_token_error', description: 'The provided upload token is invalid' },
+  };
+  const chunk = await app.inject({
+    method: 'POST',
+    url: `/api/media/${itemId}/upload/chunk?index=0`,
+    headers: octet,
+    payload: Buffer.alloc(chunkSize, 7),
+  });
+  assert.equal(chunk.statusCode, 410, chunk.body);
+  assert.equal(chunk.json().error, 'session_expired');
+
+  const { rows } = await pool.query('SELECT status FROM upload_sessions WHERE id = $1', [
+    sessionId,
+  ]);
+  assert.equal(rows[0].status, 'closed');
+});
+
+test('backup retry requeues items and drops dead sessions', { skip }, async () => {
+  const app = await buildApp();
+  const { userId, token } = await createUser();
+  try {
+    const sourceId = await createSource(userId);
+    const failed = await createItem(sourceId, { status: 'failed' });
+    const uploading = await createItem(sourceId, { status: 'uploading' });
+    const skipped = await createItem(sourceId, { status: 'skipped' });
+    const uploaded = await createItem(sourceId, { status: 'uploaded' });
+    await pool.query(
+      "UPDATE media_items SET backup_error = 'boom', backup_attempts = 5 WHERE id = ANY($1::uuid[])",
+      [[failed, uploading, skipped]],
+    );
+    await pool.query(
+      "INSERT INTO upload_sessions (media_id, status, expires_at) VALUES ($1, 'open', now() + interval '1 hour')",
+      [uploading],
+    );
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/backup/retry',
+      headers: { authorization: `Bearer ${token}` },
+      payload: { source_id: sourceId },
+    });
+    assert.equal(response.statusCode, 200, response.body);
+    assert.equal(response.json().queued, 3);
+
+    const { rows } = await pool.query(
+      'SELECT id, backup_status, backup_error, backup_attempts FROM media_items WHERE id = ANY($1::uuid[])',
+      [[failed, uploading, skipped, uploaded]],
+    );
+    const byId = new Map(rows.map((row) => [row.id, row]));
+    for (const id of [failed, uploading, skipped]) {
+      assert.equal(byId.get(id).backup_status, 'pending');
+      assert.equal(byId.get(id).backup_error, null);
+      assert.equal(byId.get(id).backup_attempts, 0);
+    }
+    assert.equal(byId.get(uploaded).backup_status, 'uploaded');
+
+    const { rows: sessions } = await pool.query(
+      'SELECT status FROM upload_sessions WHERE media_id = $1',
+      [uploading],
+    );
+    assert.equal(sessions[0].status, 'closed');
+  } finally {
+    await app.close();
+    await cleanupUser(userId);
+  }
+});
+
+test('backup skip marks items skipped and drops them from the queue', { skip }, async () => {
+  const app = await buildApp();
+  const { userId, token } = await createUser();
+  try {
+    const sourceId = await createSource(userId);
+    const item = await createItem(sourceId, { status: 'failed' });
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/backup/skip',
+      headers: { authorization: `Bearer ${token}` },
+      payload: { ids: [item] },
+    });
+    assert.equal(response.statusCode, 200, response.body);
+    assert.equal(response.json().skipped, 1);
+    const { rows } = await pool.query('SELECT backup_status FROM media_items WHERE id = $1', [
+      item,
+    ]);
+    assert.equal(rows[0].backup_status, 'skipped');
+
+    const pending = await app.inject({
+      method: 'GET',
+      url: '/api/backup/pending',
+      headers: { authorization: `Bearer ${token}` },
+    });
+    assert.equal(pending.json().items.find((entry) => entry.id === item), undefined);
+  } finally {
+    await app.close();
+    await cleanupUser(userId);
+  }
+});
+
+test('backup status reports skipped items', { skip }, async () => {
+  const app = await buildApp();
+  const { userId, token } = await createUser();
+  try {
+    const sourceId = await createSource(userId);
+    await createItem(sourceId, { status: 'skipped' });
+    const status = await app.inject({
+      method: 'GET',
+      url: '/api/backup/status',
+      headers: { authorization: `Bearer ${token}` },
+    });
+    const entry = status.json().sources.find((source) => source.id === sourceId);
+    assert.equal(entry.skipped, 1);
+  } finally {
+    await app.close();
+    await cleanupUser(userId);
+  }
+});
